@@ -1,0 +1,237 @@
+package crush
+
+import (
+	"fmt"
+	"sort"
+	"strings"
+
+	"github.com/initializ/ctxzip/ccr"
+)
+
+// TextCrusher compresses prose extractively: it keeps a subset of the original
+// sentences verbatim and offloads the rest. It never paraphrases, so anything
+// it keeps is exactly what was there — and anything it drops is reversible via
+// the CCR store, like every other crusher.
+//
+// Two modes:
+//   - With a query, sentences are ranked by BM25 relevance; the most relevant
+//     ones (plus lead/tail and any fragile sentence) are kept up to a target.
+//   - Without a query, it only removes near-duplicate sentences, so compression
+//     is conservative when there is no signal about what matters.
+type TextCrusher struct {
+	// MinChars / MinSentences are the floors below which prose is left alone.
+	MinChars     int
+	MinSentences int
+	// LeadKeep / TailKeep are sentences always kept at the start/end.
+	LeadKeep int
+	TailKeep int
+	// TargetKeepRatio is roughly the fraction of sentences kept in query mode.
+	TargetKeepRatio float64
+	// DupThreshold is the Jaccard similarity above which a sentence is a near
+	// duplicate (no-query mode).
+	DupThreshold float64
+}
+
+// NewTextCrusher returns a TextCrusher with sensible defaults.
+func NewTextCrusher() *TextCrusher {
+	return &TextCrusher{
+		MinChars:        400,
+		MinSentences:    8,
+		LeadKeep:        2,
+		TailKeep:        1,
+		TargetKeepRatio: 0.5,
+		DupThreshold:    0.8,
+	}
+}
+
+// Name implements Compressor.
+func (c *TextCrusher) Name() string { return "text_extractive" }
+
+// Compress implements Compressor.
+func (c *TextCrusher) Compress(req Request) (Result, error) {
+	if len(req.Content) < c.MinChars || req.Store == nil {
+		return passthrough(c.Name(), req.Content), nil
+	}
+	sents := splitSentences(req.Content)
+	if len(sents) < c.MinSentences {
+		return passthrough(c.Name(), req.Content), nil
+	}
+
+	keep := make([]bool, len(sents))
+	kept := 0
+	mark := func(i int) {
+		if !keep[i] {
+			keep[i] = true
+			kept++
+		}
+	}
+
+	// Forced keeps: lead, tail, error-like and fragile sentences.
+	for i, s := range sents {
+		if i < c.LeadKeep || i >= len(sents)-c.TailKeep {
+			mark(i)
+			continue
+		}
+		lower := strings.ToLower(s)
+		if looksError(lower) || looksFragile(s) {
+			mark(i)
+		}
+	}
+
+	terms := queryTerms(req.Query)
+	if len(terms) > 0 {
+		c.selectByRelevance(sents, terms, keep, mark, &kept)
+	} else {
+		c.selectByDedup(sents, keep, mark)
+	}
+
+	var keptSents, dropped []string
+	for i, s := range sents {
+		if keep[i] {
+			keptSents = append(keptSents, s)
+		} else {
+			dropped = append(dropped, s)
+		}
+	}
+	if len(dropped) == 0 {
+		return passthrough(c.Name(), req.Content), nil
+	}
+
+	blob := []byte(strings.Join(dropped, " "))
+	hash := ccr.Hash(blob)
+	if err := req.Store.Put(hash, blob, ccr.Meta{
+		ToolName:     req.ToolName,
+		Query:        req.Query,
+		ItemCount:    len(dropped),
+		OriginalKind: "text",
+	}); err != nil {
+		return passthrough(c.Name(), req.Content), nil
+	}
+
+	marker := ccr.Marker(hash, fmt.Sprintf("%d_sentences_offloaded", len(dropped)))
+	out := strings.Join(keptSents, " ") + " " + marker
+	return Result{Compressed: out, Strategy: c.Name(), Markers: []string{hash}}, nil
+}
+
+// selectByRelevance keeps the highest-BM25 sentences up to the target budget,
+// filling any shortfall by original order so it never over-drops.
+func (c *TextCrusher) selectByRelevance(sents []string, terms []string, keep []bool, mark func(int), kept *int) {
+	docs := make([][]string, len(sents))
+	for i, s := range sents {
+		docs[i] = tokenizeWords(s)
+	}
+	m := newBM25(docs)
+
+	type scored struct {
+		idx   int
+		score float64
+	}
+	ranked := make([]scored, 0, len(sents))
+	for i := range sents {
+		if keep[i] {
+			continue
+		}
+		ranked = append(ranked, scored{i, m.score(terms, i)})
+	}
+	sort.SliceStable(ranked, func(a, b int) bool { return ranked[a].score > ranked[b].score })
+
+	budget := int(float64(len(sents)) * c.TargetKeepRatio)
+	if budget < *kept {
+		budget = *kept
+	}
+	// Add relevant (positive-score) sentences first.
+	for _, r := range ranked {
+		if *kept >= budget || r.score <= 0 {
+			break
+		}
+		mark(r.idx)
+	}
+	// If still under budget, fill by original order so we keep ~budget total.
+	for i := 0; i < len(sents) && *kept < budget; i++ {
+		mark(i)
+	}
+}
+
+// selectByDedup keeps every sentence except near-duplicates of one already kept.
+func (c *TextCrusher) selectByDedup(sents []string, keep []bool, mark func(int)) {
+	var keptToks [][]string
+	for i := range sents {
+		toks := tokenizeWords(sents[i])
+		if keep[i] {
+			keptToks = append(keptToks, toks)
+			continue
+		}
+		if isNearDup(toks, keptToks, c.DupThreshold) {
+			continue // drop redundant sentence
+		}
+		mark(i)
+		keptToks = append(keptToks, toks)
+	}
+}
+
+// splitSentences breaks text into verbatim sentences on terminal punctuation
+// and newlines. It preserves the words exactly; only inter-sentence whitespace
+// is normalised on reassembly.
+func splitSentences(text string) []string {
+	var out []string
+	var b strings.Builder
+	flush := func() {
+		if s := strings.TrimSpace(b.String()); s != "" {
+			out = append(out, s)
+		}
+		b.Reset()
+	}
+	for _, r := range text {
+		b.WriteRune(r)
+		if r == '.' || r == '!' || r == '?' || r == '\n' {
+			flush()
+		}
+	}
+	flush()
+	return out
+}
+
+func tokenizeWords(s string) []string {
+	return strings.FieldsFunc(strings.ToLower(s), func(r rune) bool {
+		return !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '_')
+	})
+}
+
+// isNearDup reports whether toks is a near-duplicate (Jaccard ≥ threshold) of
+// any document in corpus.
+func isNearDup(toks []string, corpus [][]string, threshold float64) bool {
+	if len(toks) == 0 {
+		return false
+	}
+	set := make(map[string]struct{}, len(toks))
+	for _, t := range toks {
+		set[t] = struct{}{}
+	}
+	for _, other := range corpus {
+		if jaccard(set, other) >= threshold {
+			return true
+		}
+	}
+	return false
+}
+
+func jaccard(set map[string]struct{}, other []string) float64 {
+	if len(set) == 0 || len(other) == 0 {
+		return 0
+	}
+	otherSet := make(map[string]struct{}, len(other))
+	for _, t := range other {
+		otherSet[t] = struct{}{}
+	}
+	inter := 0
+	for t := range set {
+		if _, ok := otherSet[t]; ok {
+			inter++
+		}
+	}
+	union := len(set) + len(otherSet) - inter
+	if union == 0 {
+		return 0
+	}
+	return float64(inter) / float64(union)
+}

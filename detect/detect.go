@@ -1,0 +1,108 @@
+// Package detect classifies a blob of content so the router can pick the
+// right compressor. Detection is a fast, dependency-free heuristic cascade in
+// priority order, mirroring headroom's content_detector. It never parses the
+// whole input where a prefix will do.
+package detect
+
+import (
+	"encoding/json"
+	"regexp"
+	"strings"
+)
+
+// ContentType is the detected shape of a piece of content.
+type ContentType string
+
+const (
+	JSONArray     ContentType = "json_array"
+	GitDiff       ContentType = "git_diff"
+	SearchResults ContentType = "search_results"
+	BuildLog      ContentType = "log"
+	SourceCode    ContentType = "source_code"
+	PlainText     ContentType = "plain_text"
+)
+
+// Detection is the result of classifying content.
+type Detection struct {
+	Type       ContentType
+	Confidence float64 // 0..1
+}
+
+var (
+	diffHeaderRe = regexp.MustCompile(`(?m)^(diff --git |--- a/|\+\+\+ b/|@@ )`)
+	searchRe     = regexp.MustCompile(`(?m)^[^:\n]+:\d+:`)
+	logRe        = regexp.MustCompile(`(?i)\b(error|warn|warning|traceback|exception|fatal|panic)\b|^\s*at\s+\S+\(|^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}`)
+	codeRe       = regexp.MustCompile(`(?m)^\s*(def |func |class |import |from \S+ import |const |let |var |function |package |type \w+ struct|public |private )`)
+)
+
+// Detect classifies content. The cascade is ordered most-specific first; the
+// first rule that clears its confidence floor wins, otherwise PlainText.
+func Detect(content string) Detection {
+	trimmed := strings.TrimSpace(content)
+	if trimmed == "" {
+		return Detection{Type: PlainText, Confidence: 1}
+	}
+
+	if d, ok := detectJSONArray(trimmed); ok {
+		return d
+	}
+	if diffHeaderRe.MatchString(firstLines(trimmed, 500)) {
+		return Detection{Type: GitDiff, Confidence: 0.8}
+	}
+	if frac := lineMatchFraction(trimmed, searchRe); frac >= 0.3 {
+		return Detection{Type: SearchResults, Confidence: frac}
+	}
+	if frac := lineMatchFraction(trimmed, logRe); frac >= 0.1 {
+		return Detection{Type: BuildLog, Confidence: 0.5 + frac/2}
+	}
+	if countMatches(trimmed, codeRe) >= 3 {
+		return Detection{Type: SourceCode, Confidence: 0.6}
+	}
+	return Detection{Type: PlainText, Confidence: 1}
+}
+
+func detectJSONArray(s string) (Detection, bool) {
+	if !strings.HasPrefix(s, "[") {
+		return Detection{}, false
+	}
+	var arr []json.RawMessage
+	if err := json.Unmarshal([]byte(s), &arr); err != nil {
+		return Detection{}, false
+	}
+	return Detection{Type: JSONArray, Confidence: 1}, true
+}
+
+func firstLines(s string, n int) string {
+	idx, count := 0, 0
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\n' {
+			count++
+			if count >= n {
+				idx = i
+				break
+			}
+		}
+	}
+	if idx == 0 {
+		return s
+	}
+	return s[:idx]
+}
+
+func lineMatchFraction(s string, re *regexp.Regexp) float64 {
+	lines := strings.Split(s, "\n")
+	if len(lines) == 0 {
+		return 0
+	}
+	matched := 0
+	for _, ln := range lines {
+		if re.MatchString(ln) {
+			matched++
+		}
+	}
+	return float64(matched) / float64(len(lines))
+}
+
+func countMatches(s string, re *regexp.Regexp) int {
+	return len(re.FindAllString(s, -1))
+}
