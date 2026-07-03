@@ -79,7 +79,7 @@ func (c *TextCrusher) Compress(req Request) (Result, error) {
 			continue
 		}
 		lower := strings.ToLower(s)
-		if looksError(lower) {
+		if looksError(lower) || mustKeep(lower, req.MustKeep) {
 			mark(i)
 			continue
 		}

@@ -6,7 +6,11 @@ import (
 )
 
 func TestLooksError(t *testing.T) {
-	yes := []string{"connection timeout", "ERROR: boom", "request failed", "invalid token"}
+	yes := []string{
+		"connection timeout", "ERROR: boom", "request failed", "invalid token",
+		// k8s state words added after live testing showed they matched nothing.
+		`"status": "CrashLoopBackOff"`, "ImagePullBackOff", "OOMKilled", "pod evicted",
+	}
 	no := []string{"all good", "request handled ok", "status running"}
 	for _, s := range yes {
 		if !looksError(s) {

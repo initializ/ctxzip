@@ -65,8 +65,8 @@ func (c *JSONCrusher) Compress(req Request) (Result, error) {
 			continue
 		}
 		seen[s] = true
-		// Must-keep: error-like or query-relevant items.
-		if looksError(s) || matchesAny(s, terms) {
+		// Must-keep: error-like, builder-flagged, or query-relevant items.
+		if looksError(s) || mustKeep(s, req.MustKeep) || matchesAny(s, terms) {
 			keep[i] = true
 		}
 	}

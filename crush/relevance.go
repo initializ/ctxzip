@@ -26,10 +26,15 @@ func looksFragile(s string) bool {
 
 // errorMarkers are substrings that flag an item as worth keeping verbatim.
 // Dropping an error the user is about to ask about is the catastrophic failure
-// mode for a compressor, so this list is deliberately generous.
+// mode for a compressor, so this list is deliberately generous. The k8s-ish
+// entries (crash, backoff, oomkilled, evicted) earn their place from live
+// testing: "CrashLoopBackOff" matched nothing in the original list and
+// survived only via signature dedup. Builders extend (never replace) this via
+// Options.MustKeep — see MustKeepTerms.
 var errorMarkers = []string{
 	"error", "fail", "exception", "critical", "fatal",
 	"panic", "timeout", "denied", "rejected", "invalid", "traceback",
+	"crash", "backoff", "oomkilled", "evicted", "unhealthy", "degraded",
 }
 
 // looksError reports whether s mentions an error-like term. Case-insensitive.
@@ -41,6 +46,31 @@ func looksError(s string) bool {
 		}
 	}
 	return false
+}
+
+// mustKeep reports whether s matches any caller-supplied must-keep term
+// (already lowercased by NormalizeMustKeep). These are UNION semantics with
+// the built-in errorMarkers — builder terms only ever add protection.
+func mustKeep(s string, terms []string) bool {
+	if len(terms) == 0 {
+		return false
+	}
+	return matchesAny(strings.ToLower(s), terms)
+}
+
+// NormalizeMustKeep lowercases and trims caller-supplied must-keep terms,
+// dropping empties, so per-item matching does no repeated work.
+func NormalizeMustKeep(terms []string) []string {
+	if len(terms) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(terms))
+	for _, t := range terms {
+		if t = strings.ToLower(strings.TrimSpace(t)); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 // queryTerms splits a user query into lowercase terms worth matching on,

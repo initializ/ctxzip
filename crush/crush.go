@@ -14,6 +14,11 @@ type Request struct {
 	Query string
 	// ToolName labels the source for retrieval metadata. May be empty.
 	ToolName string
+	// MustKeep is the caller's extra force-keep vocabulary: any item, line, or
+	// sentence containing one of these (case-insensitive substrings) is never
+	// dropped. Union with the built-in error markers — it adds protection,
+	// never removes it. Pass through NormalizeMustKeep first.
+	MustKeep []string
 	// Store receives originals of anything dropped. If nil, the compressor must
 	// fall back to lossless behaviour (it may not drop anything it cannot store).
 	Store ccr.Store

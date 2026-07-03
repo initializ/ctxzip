@@ -35,6 +35,13 @@ type Options struct {
 	// compressing content the model just asked to expand recreates the marker
 	// it tried to resolve — an expand/compress tail-chase.
 	SkipNames map[string]bool
+
+	// MustKeep is the caller's domain vocabulary of case-insensitive
+	// substrings that must never be dropped, e.g. Kubernetes state words
+	// ("CrashLoopBackOff", "ImagePullBackOff") or product-specific error
+	// codes. UNION semantics with the built-in error markers — entries only
+	// ever add protection; the built-in floor cannot be disabled.
+	MustKeep []string
 }
 
 // DefaultOptions returns the recommended configuration.

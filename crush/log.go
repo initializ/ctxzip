@@ -41,7 +41,7 @@ func (c *LogCrusher) Compress(req Request) (Result, error) {
 			continue
 		}
 		lower := strings.ToLower(ln)
-		if looksError(lower) || matchesAny(lower, terms) {
+		if looksError(lower) || mustKeep(lower, req.MustKeep) || matchesAny(lower, terms) {
 			keep[i] = true
 			continue
 		}

@@ -32,6 +32,7 @@ func Compress(msgs []Message, opts *Options) (*Result, error) {
 	if query == "" {
 		query = deriveQuery(msgs)
 	}
+	mustKeep := crush.NormalizeMustKeep(opts.MustKeep)
 
 	r := router.New()
 	out := make([]Message, len(msgs))
@@ -54,6 +55,7 @@ func Compress(msgs []Message, opts *Options) (*Result, error) {
 			Content:  m.Content,
 			Query:    query,
 			ToolName: m.Name,
+			MustKeep: mustKeep,
 			Store:    opts.Store,
 		})
 		if err != nil {

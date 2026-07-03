@@ -128,6 +128,49 @@ func TestCompress_SkipNames(t *testing.T) {
 	}
 }
 
+// Builder-supplied MustKeep vocabulary must rescue items the built-in error
+// floor knows nothing about (domain state words, product error codes).
+func TestCompress_MustKeepCustomVocabulary(t *testing.T) {
+	store := ccr.NewMemoryStore(ccr.MemoryConfig{})
+
+	// A domain-specific "bad" status that matches no built-in error marker,
+	// buried in the droppable middle of a large array.
+	items := make([]map[string]any, 60)
+	for i := range items {
+		items[i] = map[string]any{"id": fmt.Sprintf("r-%03d", i), "state": "nominal"}
+	}
+	items[30] = map[string]any{"id": "r-030", "state": "QUARANTINED"}
+	blob, _ := json.Marshal(items)
+
+	msgs := []Message{
+		{Role: RoleSystem, Content: "sys"},
+		{Role: RoleUser, Content: "check the fleet"},
+		{Role: RoleTool, Name: "fleet_list", Content: string(blob)},
+		{Role: RoleAssistant, Content: "looking"},
+		{Role: RoleUser, Content: "ok"},
+	}
+
+	// Without the builder pattern the row is dropped (still retrievable, but
+	// not visible); with it, the row survives in the compressed view.
+	opts := DefaultOptions()
+	opts.Store = store
+	res, _ := Compress(msgs, opts)
+	if strings.Contains(res.Messages[2].Content, "QUARANTINED") {
+		t.Skip("row survived without MustKeep — fixture no longer exercises the gap")
+	}
+
+	opts2 := DefaultOptions()
+	opts2.Store = ccr.NewMemoryStore(ccr.MemoryConfig{})
+	opts2.MustKeep = []string{"Quarantined"} // case-insensitive
+	res2, _ := Compress(msgs, opts2)
+	if res2.Messages[2].Content == string(blob) {
+		t.Fatal("expected compression to still occur")
+	}
+	if !strings.Contains(res2.Messages[2].Content, "QUARANTINED") {
+		t.Fatal("MustKeep pattern failed to rescue the domain-critical row")
+	}
+}
+
 func TestCompress_DoesNotMutateInput(t *testing.T) {
 	store := ccr.NewMemoryStore(ccr.MemoryConfig{})
 	original := bigJSONArray(60)
