@@ -109,6 +109,9 @@ func shouldCompress(i, n int, m *Message, tokens int, opts *Options) bool {
 	if !opts.compressRole(m.Role) {
 		return false
 	}
+	if opts.SkipNames[m.Name] {
+		return false // e.g. the host's expansion tool — see Options.SkipNames
+	}
 	if tokens < opts.MinTokens {
 		return false
 	}

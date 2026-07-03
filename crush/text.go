@@ -2,6 +2,7 @@ package crush
 
 import (
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -52,11 +53,12 @@ func (c *TextCrusher) Compress(req Request) (Result, error) {
 	if len(req.Content) < c.MinChars || req.Store == nil {
 		return passthrough(c.Name(), req.Content), nil
 	}
-	sents := splitSentences(req.Content)
+	sents, sep := splitSentences(req.Content)
 	if len(sents) < c.MinSentences {
 		return passthrough(c.Name(), req.Content), nil
 	}
 
+	lineMode := sep == "\n"
 	keep := make([]bool, len(sents))
 	kept := 0
 	mark := func(i int) {
@@ -66,22 +68,37 @@ func (c *TextCrusher) Compress(req Request) (Result, error) {
 		}
 	}
 
-	// Forced keeps: lead, tail, error-like and fragile sentences.
+	// Forced keeps: lead, tail, and error-like sentences. The fragile-token
+	// floor applies to prose only — in line mode (grep/log output) nearly
+	// every line contains a path or identifier, so the floor would pin
+	// everything and defeat compression; reversibility plus the error floor
+	// carry the fidelity guarantee there instead.
 	for i, s := range sents {
 		if i < c.LeadKeep || i >= len(sents)-c.TailKeep {
 			mark(i)
 			continue
 		}
 		lower := strings.ToLower(s)
-		if looksError(lower) || looksFragile(s) {
+		if looksError(lower) {
+			mark(i)
+			continue
+		}
+		if !lineMode && looksFragile(s) {
 			mark(i)
 		}
 	}
 
 	terms := queryTerms(req.Query)
-	if len(terms) > 0 {
+	switch {
+	case lineMode:
+		// Line-oriented content dedups by numeric-insensitive signature —
+		// "pods.json:5: status: Running" and "pods.json:14: status: Running"
+		// are the same information; the count survives in the marker note.
+		// Query-matching lines are exact anchors and never dropped.
+		c.selectByLineDedup(sents, terms, keep, mark)
+	case len(terms) > 0:
 		c.selectByRelevance(sents, terms, keep, mark, &kept)
-	} else {
+	default:
 		c.selectByDedup(sents, keep, mark)
 	}
 
@@ -97,7 +114,10 @@ func (c *TextCrusher) Compress(req Request) (Result, error) {
 		return passthrough(c.Name(), req.Content), nil
 	}
 
-	blob := []byte(strings.Join(dropped, " "))
+	// Join with the same separator the content was split on, so both the
+	// stored original and the kept rendering preserve the source layout —
+	// line-oriented content (logs, grep output) keeps its newlines.
+	blob := []byte(strings.Join(dropped, sep))
 	hash := ccr.Hash(blob)
 	if err := req.Store.Put(hash, blob, ccr.Meta{
 		ToolName:     req.ToolName,
@@ -109,7 +129,7 @@ func (c *TextCrusher) Compress(req Request) (Result, error) {
 	}
 
 	marker := ccr.Marker(hash, fmt.Sprintf("%d_sentences_offloaded", len(dropped)))
-	out := strings.Join(keptSents, " ") + " " + marker
+	out := strings.Join(keptSents, sep) + sep + marker
 	return Result{Compressed: out, Strategy: c.Name(), Markers: []string{hash}}, nil
 }
 
@@ -152,6 +172,38 @@ func (c *TextCrusher) selectByRelevance(sents []string, terms []string, keep []b
 	}
 }
 
+// selectByLineDedup keeps the first line of each numeric-insensitive
+// signature and every query-matching line, dropping repeats. Suited to
+// grep/log output where thousands of lines differ only by line number,
+// timestamp, or counter.
+func (c *TextCrusher) selectByLineDedup(sents []string, terms []string, keep []bool, mark func(int)) {
+	seen := make(map[string]bool, len(sents))
+	for i, s := range sents {
+		if keep[i] {
+			seen[lineSig(s)] = true
+			continue
+		}
+		if len(terms) > 0 && matchesAny(strings.ToLower(s), terms) {
+			mark(i)
+			seen[lineSig(s)] = true
+			continue
+		}
+		sig := lineSig(s)
+		if seen[sig] {
+			continue // drop numeric-variant repeat
+		}
+		seen[sig] = true
+		mark(i)
+	}
+}
+
+var digitRunRe = regexp.MustCompile(`\d+`)
+
+// lineSig canonicalizes a line for dedup: lowercase, digits collapsed to '#'.
+func lineSig(s string) string {
+	return digitRunRe.ReplaceAllString(strings.ToLower(strings.TrimSpace(s)), "#")
+}
+
 // selectByDedup keeps every sentence except near-duplicates of one already kept.
 func (c *TextCrusher) selectByDedup(sents []string, keep []bool, mark func(int)) {
 	var keptToks [][]string
@@ -169,26 +221,47 @@ func (c *TextCrusher) selectByDedup(sents []string, keep []bool, mark func(int))
 	}
 }
 
-// splitSentences breaks text into verbatim sentences on terminal punctuation
-// and newlines. It preserves the words exactly; only inter-sentence whitespace
-// is normalised on reassembly.
-func splitSentences(text string) []string {
-	var out []string
+// splitSentences breaks text into verbatim units and reports the separator to
+// rejoin them with.
+//
+// Line-oriented content (logs, grep output, anything with several newlines)
+// splits on newlines ONLY and rejoins with "\n" — splitting such text on dots
+// mangles tokens like "pods.json" and destroys the layout the model (and a
+// later retrieval) depends on. Prose splits on terminal punctuation, but only
+// when followed by whitespace, so "3.14" and "file.go" never break mid-token.
+func splitSentences(text string) (sents []string, sep string) {
+	if strings.Count(text, "\n") >= 4 {
+		for _, ln := range strings.Split(text, "\n") {
+			if strings.TrimSpace(ln) != "" {
+				sents = append(sents, ln)
+			}
+		}
+		return sents, "\n"
+	}
+
 	var b strings.Builder
 	flush := func() {
 		if s := strings.TrimSpace(b.String()); s != "" {
-			out = append(out, s)
+			sents = append(sents, s)
 		}
 		b.Reset()
 	}
-	for _, r := range text {
+	runes := []rune(text)
+	for i, r := range runes {
 		b.WriteRune(r)
-		if r == '.' || r == '!' || r == '?' || r == '\n' {
+		switch r {
+		case '\n':
 			flush()
+		case '.', '!', '?':
+			// Only a real sentence boundary when followed by whitespace (or
+			// end of text) — never split inside pods.json / v1.2 / 3.14.
+			if i+1 == len(runes) || runes[i+1] == ' ' || runes[i+1] == '\t' || runes[i+1] == '\n' {
+				flush()
+			}
 		}
 	}
 	flush()
-	return out
+	return sents, " "
 }
 
 func tokenizeWords(s string) []string {

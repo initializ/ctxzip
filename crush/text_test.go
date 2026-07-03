@@ -1,6 +1,7 @@
 package crush
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -77,6 +78,70 @@ func TestTextCrusher_ShortProse_Passthrough(t *testing.T) {
 	res, _ := c.Compress(Request{Content: in, Store: store})
 	if res.Compressed != in {
 		t.Fatal("short prose should pass through")
+	}
+}
+
+// Regression (live-test find): grep/log-shaped text must split on LINES, not
+// dots — splitting "pods.json:445:" mid-token mangled both the compressed view
+// and the stored original ("pods. pods. json:445:"). Line layout must survive
+// the compress→store→retrieve round trip byte-faithfully.
+func TestTextCrusher_LineOriented_KeepsLinesIntact(t *testing.T) {
+	store := ccr.NewMemoryStore(ccr.MemoryConfig{})
+	c := NewTextCrusher()
+
+	var sb strings.Builder
+	for i := 0; i < 120; i++ {
+		fmt.Fprintf(&sb, "pods.json:%d:  \"status\": \"Running\",\n", i*9+5)
+	}
+	sb.WriteString("pods.json:701:  \"error\": \"OOMKilled: container exceeded memory limit\",\n")
+	in := sb.String()
+
+	res, err := c.Compress(Request{Content: in, Store: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Compressed == in {
+		t.Fatal("expected line dedup to compress repetitive grep output")
+	}
+	if strings.Contains(res.Compressed, "pods. json") {
+		t.Fatalf("mid-token dot split mangled output:\n%.200s", res.Compressed)
+	}
+	if !strings.Contains(res.Compressed, "OOMKilled") {
+		t.Fatal("error line dropped")
+	}
+
+	// The stored original must be intact lines, newline-separated.
+	hashes := ccr.ExtractHashes(res.Compressed)
+	if len(hashes) != 1 {
+		t.Fatalf("want 1 marker, got %d", len(hashes))
+	}
+	entry, ok := store.Get(hashes[0])
+	if !ok {
+		t.Fatal("dropped lines not retrievable")
+	}
+	blob := string(entry.Original)
+	if strings.Contains(blob, "pods. json") {
+		t.Fatalf("stored original mangled:\n%.200s", blob)
+	}
+	for _, ln := range strings.Split(blob, "\n") {
+		if ln != "" && !strings.HasPrefix(ln, "pods.json:") {
+			t.Fatalf("stored original line lost its layout: %q", ln)
+		}
+	}
+}
+
+// Prose with mid-token dots (versions, filenames, decimals) must not split
+// inside the token.
+func TestSplitSentences_NoMidTokenSplit(t *testing.T) {
+	sents, sep := splitSentences("We deployed v1.2 reading pods.json with pi 3.14 today. It worked well.")
+	if sep != " " {
+		t.Fatalf("prose separator = %q, want space", sep)
+	}
+	if len(sents) != 2 {
+		t.Fatalf("want 2 sentences, got %d: %q", len(sents), sents)
+	}
+	if !strings.Contains(sents[0], "pods.json") || !strings.Contains(sents[0], "3.14") {
+		t.Fatalf("mid-token split occurred: %q", sents[0])
 	}
 }
 

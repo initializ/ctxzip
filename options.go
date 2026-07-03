@@ -29,6 +29,12 @@ type Options struct {
 	// dominate token usage, so the default is tool + assistant only. User and
 	// system messages are left alone.
 	CompressRoles map[string]bool
+
+	// SkipNames excludes messages by Name (for tool messages, the tool that
+	// produced them). Hosts use this to exempt their retrieval/expansion tool:
+	// compressing content the model just asked to expand recreates the marker
+	// it tried to resolve — an expand/compress tail-chase.
+	SkipNames map[string]bool
 }
 
 // DefaultOptions returns the recommended configuration.

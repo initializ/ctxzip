@@ -106,6 +106,28 @@ func TestCompress_FreezesPrefixAndRecent(t *testing.T) {
 	}
 }
 
+// Regression (live-test find): a host's expansion tool output must be
+// exemptable, or compressing it recreates the marker the model just resolved
+// (an expand/compress tail-chase).
+func TestCompress_SkipNames(t *testing.T) {
+	store := ccr.NewMemoryStore(ccr.MemoryConfig{})
+	big := bigJSONArray(60)
+	msgs := []Message{
+		{Role: RoleUser, Content: "go"},
+		{Role: RoleTool, Name: "context_expand", Content: big}, // live zone, but exempt
+		{Role: RoleUser, Content: "x"},
+		{Role: RoleAssistant, Content: "y"},
+	}
+	opts := DefaultOptions()
+	opts.Store = store
+	opts.SkipNames = map[string]bool{"context_expand": true}
+	res, _ := Compress(msgs, opts)
+
+	if res.Messages[1].Content != big {
+		t.Fatal("SkipNames-exempt message was compressed")
+	}
+}
+
 func TestCompress_DoesNotMutateInput(t *testing.T) {
 	store := ccr.NewMemoryStore(ccr.MemoryConfig{})
 	original := bigJSONArray(60)
