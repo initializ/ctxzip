@@ -7,11 +7,17 @@ import (
 
 // fragileRe flags tokens that must never be paraphrased or dropped silently:
 // hex addresses, ALLCAPS identifiers (ERROR, EOF), dotted paths
-// (libsystem.dylib), unix paths, CLI flags, and CamelCase symbols
-// (IndexError). A sentence containing any of these is kept verbatim, mirroring
-// headroom's must-keep set. Bare numbers are intentionally excluded — "in 2024"
-// should not pin a whole sentence.
-var fragileRe = regexp.MustCompile(`0x[0-9a-fA-F]+|\b[A-Z]{2,}\b|\b[\w-]+\.[\w./-]+\b|(?:^|\s)/[\w./-]+|(?:^|\s)--?[a-zA-Z][\w-]+|[a-z][A-Z]`)
+// (libsystem.dylib), multi-segment filesystem paths (/etc/passwd), CLI flags,
+// and CamelCase symbols (IndexError). A sentence containing any of these is
+// kept verbatim, mirroring headroom's must-keep set.
+//
+// Two deliberate exclusions keep the floor from pinning everything:
+//   - bare numbers ("in 2024") — too common to be a signal.
+//   - single-segment URL paths ("/health", "/login") — the path rule requires a
+//     second segment, so generic HTTP endpoints in access logs do not pin every
+//     line (a real false positive found in testing). Real filesystem paths and
+//     multi-segment routes (/api/v1/users) still match.
+var fragileRe = regexp.MustCompile(`0x[0-9a-fA-F]+|\b[A-Z]{2,}\b|\b[\w-]+\.[\w./-]+\b|(?:^|\s)/[\w.-]+/[\w./-]+|(?:^|\s)--?[a-zA-Z][\w-]+|[a-z][A-Z]`)
 
 // looksFragile reports whether s contains a token that should be kept verbatim.
 func looksFragile(s string) bool {

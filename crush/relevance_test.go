@@ -24,12 +24,17 @@ func TestLooksFragile(t *testing.T) {
 	yes := []string{
 		"see 0xdeadbeef for the address",
 		"raised an IndexError here",
-		"open /etc/passwd now",
+		"open /etc/passwd now",        // multi-segment filesystem path
+		"route is /api/v1/users here", // multi-segment URL still pins
 		"pass the --verbose flag",
 		"in libsystem_kernel.dylib",
 		"got an EOF",
 	}
-	no := []string{"the year was 2024", "a plain english sentence"}
+	no := []string{
+		"the year was 2024",
+		"a plain english sentence",
+		"the endpoint is /health today", // single-segment URL must NOT pin
+	}
 	for _, s := range yes {
 		if !looksFragile(s) {
 			t.Errorf("looksFragile(%q) = false, want true", s)

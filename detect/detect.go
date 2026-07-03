@@ -30,9 +30,14 @@ type Detection struct {
 
 var (
 	diffHeaderRe = regexp.MustCompile(`(?m)^(diff --git |--- a/|\+\+\+ b/|@@ )`)
-	searchRe     = regexp.MustCompile(`(?m)^[^:\n]+:\d+:`)
-	logRe        = regexp.MustCompile(`(?i)\b(error|warn|warning|traceback|exception|fatal|panic)\b|^\s*at\s+\S+\(|^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}`)
-	codeRe       = regexp.MustCompile(`(?m)^\s*(def |func |class |import |from \S+ import |const |let |var |function |package |type \w+ struct|public |private )`)
+	// searchRe matches grep-style "path:line:content". The prefix must look like
+	// a file path — a no-space, no-colon token containing a "." "/" or "\" — so
+	// that timestamped log lines like "2026-06-30T10:00:01 ..." (whose "10:00:"
+	// also satisfies ":digits:") are NOT misread as search results and instead
+	// fall through to the log rule.
+	searchRe = regexp.MustCompile(`(?m)^[^\s:]*[./\\][^\s:]*:\d+:`)
+	logRe    = regexp.MustCompile(`(?i)\b(error|warn|warning|traceback|exception|fatal|panic)\b|^\s*at\s+\S+\(|^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}`)
+	codeRe   = regexp.MustCompile(`(?m)^\s*(def |func |class |import |from \S+ import |const |let |var |function |package |type \w+ struct|public |private )`)
 )
 
 // Detect classifies content. The cascade is ordered most-specific first; the
