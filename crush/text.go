@@ -176,7 +176,13 @@ func (c *TextCrusher) selectByRelevance(sents []string, terms []string, keep []b
 // signature and every query-matching line, dropping repeats. Suited to
 // grep/log output where thousands of lines differ only by line number,
 // timestamp, or counter.
+//
+// Query terms that match most lines are ignored as stop-terms: when the
+// query is a tool invocation (grep pattern + file path), terms like the
+// file name match every result line and carry no selection signal — honoring
+// them would pin everything and disable compression entirely (observed live).
 func (c *TextCrusher) selectByLineDedup(sents []string, terms []string, keep []bool, mark func(int)) {
+	terms = discriminativeTerms(sents, terms)
 	seen := make(map[string]bool, len(sents))
 	for i, s := range sents {
 		if keep[i] {
@@ -195,6 +201,31 @@ func (c *TextCrusher) selectByLineDedup(sents []string, terms []string, keep []b
 		seen[sig] = true
 		mark(i)
 	}
+}
+
+// discriminativeTerms drops query terms that match more than half the lines —
+// they cannot distinguish relevant lines from noise.
+func discriminativeTerms(sents []string, terms []string) []string {
+	if len(terms) == 0 {
+		return terms
+	}
+	out := make([]string, 0, len(terms))
+	half := len(sents) / 2
+	for _, t := range terms {
+		matches := 0
+		for _, s := range sents {
+			if strings.Contains(strings.ToLower(s), t) {
+				matches++
+				if matches > half {
+					break
+				}
+			}
+		}
+		if matches <= half {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 var digitRunRe = regexp.MustCompile(`\d+`)

@@ -130,6 +130,36 @@ func TestTextCrusher_LineOriented_KeepsLinesIntact(t *testing.T) {
 	}
 }
 
+// Regression (live-test find): when the query is a tool invocation (grep
+// pattern + path), terms like the file name match EVERY result line; honoring
+// them pinned everything and disabled compression. Such stop-terms must be
+// ignored while rare terms still anchor their lines.
+func TestTextCrusher_LineMode_IgnoresStopTerms(t *testing.T) {
+	store := ccr.NewMemoryStore(ccr.MemoryConfig{})
+	c := NewTextCrusher()
+
+	var sb strings.Builder
+	for i := 0; i < 150; i++ {
+		fmt.Fprintf(&sb, "pods.json:%d:  \"name\": \"pod-%03d\",\n", i*9+3, i)
+	}
+	sb.WriteString("pods.json:701:  \"name\": \"special-target\",\n")
+	in := sb.String()
+
+	// "pods.json" and "name" match every line (stop-terms); "special-target"
+	// matches one line (anchor).
+	res, _ := c.Compress(Request{
+		Content: in,
+		Query:   `{"pattern":"name","path":"pods.json","find":"special-target"}`,
+		Store:   store,
+	})
+	if res.Compressed == in {
+		t.Fatal("stop-terms pinned every line — compression disabled")
+	}
+	if !strings.Contains(res.Compressed, "special-target") {
+		t.Fatal("discriminative query anchor was dropped")
+	}
+}
+
 // Prose with mid-token dots (versions, filenames, decimals) must not split
 // inside the token.
 func TestSplitSentences_NoMidTokenSplit(t *testing.T) {

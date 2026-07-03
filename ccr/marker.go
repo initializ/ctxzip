@@ -15,8 +15,11 @@ import (
 const MarkerPrefix = "<<ctxzip:"
 
 // hashHexLen is how many hex chars of the SHA-256 digest form the store key.
-// 24 hex chars = 96 bits, ample collision resistance for a short-lived cache.
-const hashHexLen = 24
+// 12 hex chars = 48 bits — ample for a ≤1000-entry, 30-minute cache, and
+// short enough that an LLM transcribing the hash from a marker into a
+// retrieval tool call doesn't fumble it (live testing showed models truncate
+// or mangle 24-hex hashes).
+const hashHexLen = 12
 
 var markerRe = regexp.MustCompile(`<<ctxzip:([0-9a-f]{12,64})(?:[ ,][^>]*)?>>`)
 
