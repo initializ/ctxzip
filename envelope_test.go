@@ -102,6 +102,114 @@ func TestCompress_JSONEnvelope(t *testing.T) {
 	}
 }
 
+// Live-test find (run 004): a runtime size cap cut a 108KB envelope
+// mid-string and appended "[OUTPUT TRUNCATED ...]", breaking the JSON — the
+// envelope path bailed and the mangled blob passed through uncompressed.
+// Salvage must compress the intact prefix, emit VALID JSON, and tell the
+// model the tail was destroyed upstream (not offloaded).
+func TestCompress_TruncatedEnvelopeSalvage(t *testing.T) {
+	store := ccr.NewMemoryStore(ccr.MemoryConfig{})
+	env, _ := kubectlEnvelope(t, 300)
+
+	// Simulate the runtime's cap: cut inside the stdout string (well past the
+	// crashing pod's row) and append the truncation notice.
+	cut := len(env) * 3 / 4
+	truncated := env[:cut] + "\n\n[OUTPUT TRUNCATED -- original length: 108854 chars]"
+
+	msgs := []Message{
+		{Role: RoleUser, Content: "crashing pods?"},
+		{Role: RoleTool, Name: "cli_execute", Content: truncated},
+		{Role: RoleAssistant, Content: "x"},
+		{Role: RoleUser, Content: "y"},
+	}
+	opts := DefaultOptions()
+	opts.Store = store
+	res, err := Compress(msgs, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	compressed := res.Messages[1].Content
+	if compressed == truncated {
+		t.Fatal("truncated envelope was not salvaged (the live-test bug)")
+	}
+	if len(res.Transforms) != 1 || !strings.HasPrefix(res.Transforms[0].Strategy, "envelope_truncated:") {
+		t.Fatalf("expected envelope_truncated strategy, got %+v", res.Transforms)
+	}
+
+	// Output is VALID JSON again, with the upstream-truncation note.
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(compressed), &obj); err != nil {
+		t.Fatalf("salvaged envelope is not valid JSON: %v\n%.200s", err, compressed)
+	}
+	var note string
+	if err := json.Unmarshal(obj["_ctxzip_note"], &note); err != nil || !strings.Contains(note, "destroyed") {
+		t.Fatalf("missing/incomplete upstream-truncation note: %q err=%v", note, err)
+	}
+
+	// The intact prefix compressed with markers retrievable.
+	var stdout string
+	if err := json.Unmarshal(obj["stdout"], &stdout); err != nil {
+		t.Fatal(err)
+	}
+	hashes := ccr.ExtractHashes(stdout)
+	if len(hashes) == 0 {
+		t.Fatalf("no marker in salvaged stdout:\n%.200s", stdout)
+	}
+	if _, ok := Unzip(store, hashes[0]); !ok {
+		t.Fatal("salvaged offload not retrievable")
+	}
+
+	// Determinism.
+	res2, _ := Compress(msgs, opts)
+	if res2.Messages[1].Content != compressed {
+		t.Fatal("salvage not deterministic")
+	}
+}
+
+// A cut OUTSIDE a string value is ambiguous — salvage must bail cleanly.
+func TestCompress_TruncatedEnvelope_NonStringCutBails(t *testing.T) {
+	store := ccr.NewMemoryStore(ccr.MemoryConfig{})
+	// Big enough to pass the message-size floor, cut mid-number.
+	pad := strings.Repeat("x", 3000)
+	truncated := `{"stdout":"` + pad + `","exit_co`
+
+	msgs := []Message{
+		{Role: RoleUser, Content: "run"},
+		{Role: RoleTool, Name: "cli_execute", Content: truncated},
+		{Role: RoleAssistant, Content: "x"},
+		{Role: RoleUser, Content: "y"},
+	}
+	opts := DefaultOptions()
+	opts.Store = store
+	res, _ := Compress(msgs, opts)
+	// Falls through to direct routing; whatever happens, no envelope strategy
+	// and no invalid-JSON reconstruction claiming to be the envelope.
+	for _, tr := range res.Transforms {
+		if strings.HasPrefix(tr.Strategy, "envelope") {
+			t.Fatalf("ambiguous cut must not use envelope strategy: %+v", tr)
+		}
+	}
+}
+
+// bestEffortUnquote must stop cleanly at partial trailing escapes.
+func TestBestEffortUnquote(t *testing.T) {
+	cases := map[string]string{
+		`line1\nline2`:        "line1\nline2",
+		`tab\there`:           "tab\there",
+		`quote\"inside`:       `quote"inside`,
+		`unicode\u0041end`:    "unicodeAend",
+		`cut at escape\`:      "cut at escape",
+		`cut at unicode\u00`:  "cut at unicode",
+		`terminated"trailing`: "terminated",
+	}
+	for in, want := range cases {
+		if got := bestEffortUnquote(in); got != want {
+			t.Errorf("bestEffortUnquote(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 // Non-envelope and small-field content must fall through untouched.
 func TestCompressEnvelope_Fallthrough(t *testing.T) {
 	store := ccr.NewMemoryStore(ccr.MemoryConfig{})

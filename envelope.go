@@ -3,6 +3,8 @@ package ctxzip
 import (
 	"bytes"
 	"encoding/json"
+	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/initializ/ctxzip/crush"
@@ -66,9 +68,15 @@ func compressEnvelope(r *router.Router, req crush.Request) (crush.Result, bool) 
 		if !ok {
 			return crush.Result{}, false
 		}
+		valueStart := dec.InputOffset()
 		var raw json.RawMessage
 		if err := dec.Decode(&raw); err != nil {
-			return crush.Result{}, false
+			// The envelope may have been truncated upstream (runtimes cap
+			// tool output by size, cutting the JSON mid-string). If the cut
+			// landed inside a STRING value — the overwhelmingly common case,
+			// since the large text field dominates the envelope — salvage
+			// the intact prefix instead of bailing to passthrough.
+			return salvageTruncatedEnvelope(r, req, &b, first, key, trimmed[valueStart:])
 		}
 
 		val := []byte(raw)
@@ -121,6 +129,129 @@ func compressEnvelope(r *router.Router, req crush.Request) (crush.Result, bool) 
 		Strategy:   "envelope:" + strategy,
 		Markers:    markers,
 	}, true
+}
+
+// truncSuffixRe matches the truncation notice runtimes append after cutting
+// output at a size cap (forge's shape; kept anchored and specific).
+var truncSuffixRe = regexp.MustCompile(`\n*\[OUTPUT TRUNCATED[^\]]*\]\s*$`)
+
+// truncatedNote is added as an extra field on salvaged envelopes. It must be
+// explicit that the missing tail was DESTROYED upstream, not offloaded —
+// otherwise the model wastes a turn calling the expansion tool for bytes
+// that do not exist.
+const truncatedNote = "output was truncated upstream at the runtime's size cap before compression; " +
+	"the tail beyond this point was destroyed, not offloaded — re-run the tool " +
+	"(with a filter or pagination) if you need it"
+
+// salvageTruncatedEnvelope recovers a JSON envelope whose serialization was
+// cut mid-string by an upstream size cap. b holds the already-emitted
+// complete fields; rawTail is everything from the failing value onward. Only
+// the unambiguous case is salvaged — the tail begins a string value that
+// never terminates; anything else bails to passthrough. The rebuilt envelope
+// is valid JSON: complete fields byte-identical, the cut field's intact
+// prefix compressed through the normal routing path, plus a "_ctxzip_note"
+// field telling the model the tail is unrecoverable.
+func salvageTruncatedEnvelope(r *router.Router, req crush.Request, b *strings.Builder, first bool, key, rawTail string) (crush.Result, bool) {
+	// The tail starts right after the key token, so the "key: value"
+	// separator is still in front of the value.
+	rawTail = strings.TrimLeft(rawTail, " \t\r\n")
+	rawTail = strings.TrimPrefix(rawTail, ":")
+	rawTail = strings.TrimLeft(rawTail, " \t\r\n")
+	if !strings.HasPrefix(rawTail, `"`) {
+		return crush.Result{}, false // cut outside a string value — ambiguous, bail
+	}
+	// Strip the runtime's truncation notice (plain text appended after the
+	// cut, textually inside the unterminated string) before unescaping.
+	body := truncSuffixRe.ReplaceAllString(rawTail[1:], "")
+	inner := bestEffortUnquote(body)
+	if len(inner) < envelopeMinFieldChars {
+		return crush.Result{}, false
+	}
+
+	innerReq := req
+	innerReq.Content = inner
+	cr, err := routeOne(r, innerReq)
+	if err != nil || strings.TrimSpace(cr.Compressed) == "" {
+		return crush.Result{}, false
+	}
+	val, err := marshalJSONString(cr.Compressed)
+	if err != nil {
+		return crush.Result{}, false
+	}
+	keyBytes, err := json.Marshal(key)
+	if err != nil {
+		return crush.Result{}, false
+	}
+	noteBytes, err := marshalJSONString(truncatedNote)
+	if err != nil {
+		return crush.Result{}, false
+	}
+
+	if !first {
+		b.WriteByte(',')
+	}
+	b.Write(keyBytes)
+	b.WriteByte(':')
+	b.Write(val)
+	b.WriteString(`,"_ctxzip_note":`)
+	b.Write(noteBytes)
+	b.WriteByte('}')
+	return crush.Result{
+		Compressed: b.String(),
+		Strategy:   "envelope_truncated:" + cr.Strategy,
+		Markers:    cr.Markers,
+	}, true
+}
+
+// bestEffortUnquote decodes the escaped body of a JSON string that has no
+// closing quote (it was cut off), stopping cleanly at a trailing partial
+// escape sequence. Surrogate pairs are decoded as individual code units —
+// acceptable for salvaged text.
+func bestEffortUnquote(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); {
+		c := s[i]
+		if c == '"' {
+			break // terminated after all — take what precedes
+		}
+		if c != '\\' {
+			b.WriteByte(c)
+			i++
+			continue
+		}
+		if i+1 >= len(s) {
+			break // trailing lone backslash: the cut point
+		}
+		switch s[i+1] {
+		case 'n':
+			b.WriteByte('\n')
+		case 't':
+			b.WriteByte('\t')
+		case 'r':
+			b.WriteByte('\r')
+		case '"':
+			b.WriteByte('"')
+		case '\\':
+			b.WriteByte('\\')
+		case '/':
+			b.WriteByte('/')
+		case 'b', 'f':
+			// rare control escapes: drop the character, keep going
+		case 'u':
+			if i+6 <= len(s) {
+				if v, err := strconv.ParseUint(s[i+2:i+6], 16, 32); err == nil {
+					b.WriteRune(rune(v))
+					i += 6
+					continue
+				}
+			}
+			return b.String() // malformed/partial \u at the cut: stop
+		default:
+			return b.String() // unknown escape at the cut: stop
+		}
+		i += 2
+	}
+	return b.String()
 }
 
 // marshalJSONString encodes s as a JSON string without HTML escaping, so the
