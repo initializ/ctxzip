@@ -5,7 +5,6 @@ import (
 
 	"github.com/initializ/ctxzip/ccr"
 	"github.com/initializ/ctxzip/crush"
-	"github.com/initializ/ctxzip/detect"
 	"github.com/initializ/ctxzip/router"
 	"github.com/initializ/ctxzip/tokenize"
 )
@@ -49,18 +48,24 @@ func Compress(msgs []Message, opts *Options) (*Result, error) {
 			continue
 		}
 
-		det := detect.Detect(m.Content)
-		comp := r.For(det.Type)
-		cr, err := comp.Compress(crush.Request{
+		req := crush.Request{
 			Content:  m.Content,
 			Query:    query,
 			ToolName: m.Name,
 			MustKeep: mustKeep,
 			Store:    opts.Store,
-		})
-		if err != nil {
-			res.TokensAfter += before
-			continue
+		}
+		// JSON-object envelopes first (tool runners commonly wrap output as
+		// {"stdout": <large text>, ...} on a single line, which defeats
+		// content detection); otherwise route the content directly.
+		cr, ok := compressEnvelope(r, req)
+		if !ok {
+			var err error
+			cr, err = routeOne(r, req)
+			if err != nil {
+				res.TokensAfter += before
+				continue
+			}
 		}
 
 		after := tokenize.Estimate(cr.Compressed)

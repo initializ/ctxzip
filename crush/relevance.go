@@ -35,6 +35,10 @@ var errorMarkers = []string{
 	"error", "fail", "exception", "critical", "fatal",
 	"panic", "timeout", "denied", "rejected", "invalid", "traceback",
 	"crash", "backoff", "oomkilled", "evicted", "unhealthy", "degraded",
+	// "warn" covers warn/warning/Warning — kubectl events flag problems as
+	// TYPE=Warning, and dropping those from a triage sweep is exactly the
+	// catastrophic-miss this floor exists to prevent (found live).
+	"warn",
 }
 
 // looksError reports whether s mentions an error-like term. Case-insensitive.

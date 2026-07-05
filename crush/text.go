@@ -228,11 +228,26 @@ func discriminativeTerms(sents []string, terms []string) []string {
 	return out
 }
 
-var digitRunRe = regexp.MustCompile(`\d+`)
+var (
+	// idTokenRe matches whitespace-delimited tokens carrying at least one
+	// digit — pod names ("backup-job-29610720-sdmkc"), counters ("0/1"),
+	// ages ("381d"), IPs, hashes. In infrastructure output these are the
+	// identifier axis; the remaining words are the information axis.
+	idTokenRe = regexp.MustCompile(`\S*\d\S*`)
+	wsRunRe   = regexp.MustCompile(`\s+`)
+)
 
-// lineSig canonicalizes a line for dedup: lowercase, digits collapsed to '#'.
+// lineSig canonicalizes a line for dedup: lowercase, every digit-bearing
+// token collapsed to '#', whitespace runs (column alignment) collapsed to
+// one space. Two kubectl rows that differ only in pod name, ready count,
+// restarts, and age therefore share a signature — "same information modulo
+// identifiers" — while any row with a distinct status word (CrashLoopBackOff)
+// keeps its own. Digit-only collapsing was not enough in live testing:
+// k8s tables barely deduped because every pod NAME is a unique token.
 func lineSig(s string) string {
-	return digitRunRe.ReplaceAllString(strings.ToLower(strings.TrimSpace(s)), "#")
+	s = strings.ToLower(strings.TrimSpace(s))
+	s = idTokenRe.ReplaceAllString(s, "#")
+	return wsRunRe.ReplaceAllString(s, " ")
 }
 
 // selectByDedup keeps every sentence except near-duplicates of one already kept.
