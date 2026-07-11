@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/initializ/ctxzip/ccr"
@@ -138,6 +139,17 @@ func renderArray(kept []json.RawMessage, sentinel map[string]string) (string, er
 	return b.String(), nil
 }
 
+// categoryFields are probed, in order, for a scalar value to categorize
+// dropped items by — the fields whose value distribution answers "what was
+// offloaded?" without retrieving it. A field whose value is an object gets
+// one nested probe (kubectl pods: status is an object, status.phase is the
+// signal).
+var categoryFields = []string{"status", "state", "phase", "level", "severity", "type", "reason", "result", "kind"}
+
+// summarize renders the sentinel's human/LLM-readable description of what was
+// offloaded. When the dropped items share a scalar category field, the value
+// distribution is included — "118 Running, 2 Succeeded" lets the model answer
+// count questions (and decide whether to expand) without retrieving anything.
 func summarize(dropped []json.RawMessage) string {
 	errs := 0
 	for _, d := range dropped {
@@ -145,8 +157,94 @@ func summarize(dropped []json.RawMessage) string {
 			errs++
 		}
 	}
-	if errs > 0 {
-		return fmt.Sprintf("%d items offloaded (%d error-like) — retrieve to inspect", len(dropped), errs)
+
+	field, counts := categorize(dropped)
+	parts := make([]string, 0, 2)
+	if field != "" {
+		parts = append(parts, field+": "+renderCounts(counts, len(dropped)))
 	}
-	return fmt.Sprintf("%d items offloaded — retrieve to inspect", len(dropped))
+	if errs > 0 {
+		parts = append(parts, fmt.Sprintf("%d error-like", errs))
+	}
+	if len(parts) == 0 {
+		return fmt.Sprintf("%d items offloaded — retrieve to inspect", len(dropped))
+	}
+	return fmt.Sprintf("%d items offloaded (%s) — retrieve to inspect", len(dropped), strings.Join(parts, "; "))
+}
+
+// categorize finds the first category field with scalar values in at least
+// half the dropped items and returns its name (dotted when nested) plus the
+// value counts. Returns "" when no field qualifies.
+func categorize(dropped []json.RawMessage) (string, map[string]int) {
+	for _, f := range categoryFields {
+		counts := map[string]int{}
+		name := f
+		for _, d := range dropped {
+			var obj map[string]any
+			if json.Unmarshal(d, &obj) != nil {
+				continue
+			}
+			v, ok := obj[f]
+			if !ok {
+				continue
+			}
+			// One nested probe: an object-valued category field (kubectl's
+			// status) is searched for the same scalar fields inside.
+			if inner, isObj := v.(map[string]any); isObj {
+				for _, nf := range categoryFields {
+					if nv, nok := inner[nf]; nok {
+						if s, isStr := nv.(string); isStr {
+							counts[s]++
+							name = f + "." + nf
+						}
+						break
+					}
+				}
+				continue
+			}
+			if s, isStr := v.(string); isStr {
+				counts[s]++
+			}
+		}
+		total := 0
+		for _, c := range counts {
+			total += c
+		}
+		if total*2 >= len(dropped) {
+			return name, counts
+		}
+	}
+	return "", nil
+}
+
+// renderCounts renders value counts sorted by count desc (label asc on ties),
+// capping at four values plus a remainder.
+func renderCounts(counts map[string]int, total int) string {
+	type vc struct {
+		v string
+		c int
+	}
+	sorted := make([]vc, 0, len(counts))
+	shown := 0
+	for v, c := range counts {
+		sorted = append(sorted, vc{v, c})
+	}
+	sort.Slice(sorted, func(a, b int) bool {
+		if sorted[a].c != sorted[b].c {
+			return sorted[a].c > sorted[b].c
+		}
+		return sorted[a].v < sorted[b].v
+	})
+	if len(sorted) > 4 {
+		sorted = sorted[:4]
+	}
+	parts := make([]string, 0, len(sorted)+1)
+	for _, e := range sorted {
+		parts = append(parts, fmt.Sprintf("%d %s", e.c, e.v))
+		shown += e.c
+	}
+	if rest := total - shown; rest > 0 {
+		parts = append(parts, fmt.Sprintf("%d other", rest))
+	}
+	return strings.Join(parts, ", ")
 }

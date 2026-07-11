@@ -128,9 +128,97 @@ func (c *TextCrusher) Compress(req Request) (Result, error) {
 		return passthrough(c.Name(), req.Content), nil
 	}
 
-	marker := ccr.Marker(hash, fmt.Sprintf("%d_sentences_offloaded", len(dropped)))
+	unit := "sentences"
+	if lineMode {
+		unit = "lines"
+	}
+	marker := ccr.Marker(hash, fmt.Sprintf("%d_%s_offloaded", len(dropped), unit))
 	out := strings.Join(keptSents, sep) + sep + marker
+	// In line mode, a categorical trailer after the marker tells the model
+	// WHAT was offloaded ("118 running, 20 completed"), letting it answer
+	// count questions — and decide against expanding — without retrieval.
+	if lineMode {
+		if trailer := summarizeDroppedLines(dropped); trailer != "" {
+			out += " " + trailer
+		}
+	}
 	return Result{Compressed: out, Strategy: c.Name(), Markers: []string{hash}}, nil
+}
+
+// summarizeDroppedLines groups dropped lines by their dedup signature and
+// renders the top groups with counts, labeled by the group's non-identifier
+// words: "[offloaded: 118 running, 20 completed, 11 other]". Deterministic
+// (count desc, label asc). Empty when no group yields a usable label.
+func summarizeDroppedLines(dropped []string) string {
+	type group struct {
+		label string
+		count int
+	}
+	counts := map[string]int{}
+	labels := map[string]string{}
+	for _, ln := range dropped {
+		sig := lineSig(ln)
+		counts[sig]++
+		if _, ok := labels[sig]; !ok {
+			labels[sig] = labelFromSig(sig)
+		}
+	}
+
+	groups := make([]group, 0, len(counts))
+	other := 0
+	for sig, c := range counts {
+		if labels[sig] == "" {
+			other += c
+			continue
+		}
+		groups = append(groups, group{labels[sig], c})
+	}
+	sort.Slice(groups, func(a, b int) bool {
+		if groups[a].count != groups[b].count {
+			return groups[a].count > groups[b].count
+		}
+		return groups[a].label < groups[b].label
+	})
+	if len(groups) == 0 {
+		return ""
+	}
+	if len(groups) > 3 {
+		for _, g := range groups[3:] {
+			other += g.count
+		}
+		groups = groups[:3]
+	}
+
+	parts := make([]string, 0, 4)
+	for _, g := range groups {
+		parts = append(parts, fmt.Sprintf("%d %s", g.count, g.label))
+	}
+	if other > 0 {
+		parts = append(parts, fmt.Sprintf("%d other", other))
+	}
+	return "[offloaded: " + strings.Join(parts, ", ") + "]"
+}
+
+// labelFromSig extracts a short human label from a dedup signature: the words
+// that survived identifier collapsing (the information axis), capped at three
+// tokens / 32 chars. "keda # # completed # #" → "keda completed".
+func labelFromSig(sig string) string {
+	words := make([]string, 0, 3)
+	length := 0
+	for _, tok := range strings.Fields(sig) {
+		if tok == "#" || strings.Contains(tok, "#") {
+			continue
+		}
+		if length+len(tok) > 32 {
+			break
+		}
+		words = append(words, tok)
+		length += len(tok) + 1
+		if len(words) == 3 {
+			break
+		}
+	}
+	return strings.Join(words, " ")
 }
 
 // selectByRelevance keeps the highest-BM25 sentences up to the target budget,

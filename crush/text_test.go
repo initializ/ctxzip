@@ -160,6 +160,42 @@ func TestTextCrusher_LineMode_IgnoresStopTerms(t *testing.T) {
 	}
 }
 
+// Item-2 of the roadmap: line-mode compression appends a categorical trailer
+// after the marker so the model knows WHAT was offloaded (counts by group)
+// without retrieving it.
+func TestTextCrusher_LineMode_CategoricalTrailer(t *testing.T) {
+	store := ccr.NewMemoryStore(ccr.MemoryConfig{})
+	c := NewTextCrusher()
+
+	var sb strings.Builder
+	for i := 0; i < 100; i++ {
+		fmt.Fprintf(&sb, "ns-%02d   pod-%06d   1/1   Running     0   38d\n", i%5, i*3)
+	}
+	for i := 0; i < 30; i++ {
+		fmt.Fprintf(&sb, "ns-%02d   job-%06d   0/1   Completed   0   9d\n", i%5, i*7)
+	}
+	res, _ := c.Compress(Request{Content: sb.String(), Store: store})
+
+	if res.Compressed == sb.String() {
+		t.Fatal("expected compression")
+	}
+	if !strings.Contains(res.Compressed, "[offloaded:") {
+		t.Fatalf("missing categorical trailer:\n%.200s", res.Compressed[len(res.Compressed)-200:])
+	}
+	if !strings.Contains(res.Compressed, "running") || !strings.Contains(res.Compressed, "completed") {
+		t.Fatalf("trailer lacks group labels: %s", res.Compressed[strings.Index(res.Compressed, "[offloaded:"):])
+	}
+	// The trailer must not confuse marker extraction.
+	if n := len(ccr.ExtractHashes(res.Compressed)); n != 1 {
+		t.Fatalf("marker extraction affected: %d hashes", n)
+	}
+	// Deterministic.
+	res2, _ := c.Compress(Request{Content: sb.String(), Store: ccr.NewMemoryStore(ccr.MemoryConfig{})})
+	if res2.Compressed != res.Compressed {
+		t.Fatal("trailer not deterministic")
+	}
+}
+
 // Prose with mid-token dots (versions, filenames, decimals) must not split
 // inside the token.
 func TestSplitSentences_NoMidTokenSplit(t *testing.T) {

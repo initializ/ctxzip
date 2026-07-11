@@ -80,6 +80,58 @@ func TestJSONCrusher_NonArray_Passthrough(t *testing.T) {
 	}
 }
 
+// Item-2 of the roadmap: the sentinel summary must categorize what was
+// offloaded so the model can answer count questions — and decide against
+// expanding — without retrieval.
+func TestJSONCrusher_CategoricalSummary(t *testing.T) {
+	store := ccr.NewMemoryStore(ccr.MemoryConfig{})
+	c := NewJSONCrusher()
+
+	items := make([]map[string]any, 40)
+	for i := range items {
+		status := "Running"
+		if i%10 == 0 {
+			status = "Succeeded"
+		}
+		items[i] = map[string]any{"id": fmt.Sprintf("r-%03d", i), "status": status}
+	}
+	blob, _ := json.Marshal(items)
+
+	res, err := c.Compress(Request{Content: string(blob), Store: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(res.Compressed, "status:") || !strings.Contains(res.Compressed, "Running") {
+		t.Fatalf("summary lacks category counts:\n%s", res.Compressed)
+	}
+	// Deterministic.
+	res2, _ := c.Compress(Request{Content: string(blob), Store: ccr.NewMemoryStore(ccr.MemoryConfig{})})
+	if res2.Compressed != res.Compressed {
+		t.Fatal("categorical summary not deterministic")
+	}
+}
+
+// Nested probe: kubectl pod objects carry status as an OBJECT; the summary
+// must reach status.phase.
+func TestJSONCrusher_NestedCategorySummary(t *testing.T) {
+	store := ccr.NewMemoryStore(ccr.MemoryConfig{})
+	c := NewJSONCrusher()
+
+	items := make([]map[string]any, 30)
+	for i := range items {
+		items[i] = map[string]any{
+			"metadata": map[string]any{"name": fmt.Sprintf("pod-%d", i)},
+			"status":   map[string]any{"phase": "Running", "podIP": "10.0.0.1"},
+		}
+	}
+	blob, _ := json.Marshal(items)
+
+	res, _ := c.Compress(Request{Content: string(blob), Store: store})
+	if !strings.Contains(res.Compressed, "status.phase:") {
+		t.Fatalf("nested category not surfaced:\n%s", res.Compressed)
+	}
+}
+
 func TestJSONCrusher_QueryKeepsRelevantRow(t *testing.T) {
 	store := ccr.NewMemoryStore(ccr.MemoryConfig{})
 	c := NewJSONCrusher()
