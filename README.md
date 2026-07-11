@@ -229,6 +229,9 @@ Shipped:
 - [x] JSON object walking — runner envelopes, nested objects, and array
       fields (kubectl-style `{"items": [...]}`) routed to whole-record row
       selection; truncated envelopes salvaged
+- [x] YAML/describe crusher — indentation-tree folding of boring subtrees
+      (managedFields, env lists, long scalar values) with per-subtree
+      markers; error-floor/query-protected sections never fold
 - [x] line-mode text compression (grep/log layout preserved byte-faithfully)
 - [x] durable `BoltStore` (restart-safe originals)
 - [x] caller `MustKeep` vocabulary + extended k8s error floor

@@ -11,6 +11,7 @@ func TestRouter_For(t *testing.T) {
 	cases := map[detect.ContentType]string{
 		detect.JSONArray:     "json_crusher",
 		detect.BuildLog:      "log_crusher",
+		detect.YAMLLike:      "yaml_crusher",
 		detect.PlainText:     "text_extractive",
 		detect.SearchResults: "text_extractive",
 		detect.GitDiff:       "text_extractive",

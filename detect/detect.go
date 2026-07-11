@@ -17,6 +17,7 @@ const (
 	JSONArray     ContentType = "json_array"
 	GitDiff       ContentType = "git_diff"
 	SearchResults ContentType = "search_results"
+	YAMLLike      ContentType = "yaml_like"
 	BuildLog      ContentType = "log"
 	SourceCode    ContentType = "source_code"
 	PlainText     ContentType = "plain_text"
@@ -36,8 +37,13 @@ var (
 	// also satisfies ":digits:") are NOT misread as search results and instead
 	// fall through to the log rule.
 	searchRe = regexp.MustCompile(`(?m)^[^\s:]*[./\\][^\s:]*:\d+:`)
-	logRe    = regexp.MustCompile(`(?i)\b(error|warn|warning|traceback|exception|fatal|panic)\b|^\s*at\s+\S+\(|^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}`)
-	codeRe   = regexp.MustCompile(`(?m)^\s*(def |func |class |import |from \S+ import |const |let |var |function |package |type \w+ struct|public |private )`)
+	// yamlKeyRe matches YAML-ish "key:" lines — including kubectl describe's
+	// near-YAML (Name:, Node:) and list items ("- name:"). Quoted keys
+	// (pretty-printed JSON) are deliberately excluded by the leading
+	// [A-Za-z_].
+	yamlKeyRe = regexp.MustCompile(`^\s*(- )?[A-Za-z_][\w.\-/]*:(\s|$)`)
+	logRe     = regexp.MustCompile(`(?i)\b(error|warn|warning|traceback|exception|fatal|panic)\b|^\s*at\s+\S+\(|^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}`)
+	codeRe    = regexp.MustCompile(`(?m)^\s*(def |func |class |import |from \S+ import |const |let |var |function |package |type \w+ struct|public |private )`)
 )
 
 // Detect classifies content. The cascade is ordered most-specific first; the
@@ -56,6 +62,14 @@ func Detect(content string) Detection {
 	}
 	if frac := lineMatchFraction(trimmed, searchRe); frac >= 0.3 {
 		return Detection{Type: SearchResults, Confidence: frac}
+	}
+	// YAML before log: an events-heavy `kubectl describe` has enough Warning
+	// lines to trip the log fraction, but it is structurally field-per-line
+	// and folds far better as YAML.
+	if strings.Count(trimmed, "\n") >= 14 {
+		if frac := lineMatchFraction(trimmed, yamlKeyRe); frac >= 0.4 {
+			return Detection{Type: YAMLLike, Confidence: frac}
+		}
 	}
 	if frac := lineMatchFraction(trimmed, logRe); frac >= 0.1 {
 		return Detection{Type: BuildLog, Confidence: 0.5 + frac/2}
