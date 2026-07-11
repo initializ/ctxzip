@@ -52,6 +52,14 @@ func looksError(s string) bool {
 	return false
 }
 
+// IsErrorLike reports whether s matches the built-in error floor — the terms
+// compression never drops. Exported for feedback loops in host runtimes:
+// a token already on the floor was KEPT, so it cannot be the reason a model
+// retrieved offloaded content and makes a useless keep-pattern suggestion.
+func IsErrorLike(s string) bool {
+	return looksError(s)
+}
+
 // mustKeep reports whether s matches any caller-supplied must-keep term
 // (already lowercased by NormalizeMustKeep). These are UNION semantics with
 // the built-in errorMarkers — builder terms only ever add protection.
