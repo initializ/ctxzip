@@ -102,6 +102,163 @@ func TestCompress_JSONEnvelope(t *testing.T) {
 	}
 }
 
+// kubectlJSONEnvelope simulates `kubectl get pods -A -o json` through a
+// runner envelope: {"stdout": "<pretty-printed {\"items\": [pod objects]}>"}.
+func kubectlJSONEnvelope(t *testing.T, pods int) string {
+	t.Helper()
+	items := make([]map[string]any, 0, pods+1)
+	for i := 0; i < pods; i++ {
+		items = append(items, map[string]any{
+			"apiVersion": "v1", "kind": "Pod",
+			"metadata": map[string]any{
+				"name":      fmt.Sprintf("pod-%04d", i),
+				"namespace": fmt.Sprintf("ns-%d", i%7),
+				"labels":    map[string]any{"app": fmt.Sprintf("app-%d", i%9)},
+			},
+			"status": map[string]any{"phase": "Running", "restartCount": 0},
+		})
+	}
+	items = append(items, map[string]any{
+		"apiVersion": "v1", "kind": "Pod",
+		"metadata": map[string]any{"name": "payments-api-7d9f", "namespace": "prod"},
+		"status": map[string]any{
+			"phase": "Running",
+			"containerStatuses": []map[string]any{{
+				"state":        map[string]any{"waiting": map[string]any{"reason": "CrashLoopBackOff"}},
+				"restartCount": 41,
+				"lastState":    map[string]any{"terminated": map[string]any{"reason": "OOMKilled"}},
+			}},
+		},
+	})
+	innerObj, err := json.MarshalIndent(map[string]any{"apiVersion": "v1", "items": items, "kind": "List"}, "", "    ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, err := json.Marshal(map[string]any{"stdout": string(innerObj), "stderr": "", "exit_code": 0, "truncated": false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(env)
+}
+
+// Item-1 of the post-merge roadmap: kubectl -o json is an OBJECT wrapping an
+// array — previously it fell through to line-mode text dedup, scattering
+// records. The object walker must route the items[] array through the JSON
+// crusher so anomalous records survive WHOLE and the rest offload as
+// retrievable complete records.
+func TestCompress_KubectlJSONItems(t *testing.T) {
+	store := ccr.NewMemoryStore(ccr.MemoryConfig{})
+	env := kubectlJSONEnvelope(t, 120)
+
+	msgs := []Message{
+		{Role: RoleUser, Content: "crashing pods?"},
+		{Role: RoleTool, Name: "cli_execute", Content: env},
+		{Role: RoleAssistant, Content: "x"},
+		{Role: RoleUser, Content: "y"},
+	}
+	opts := DefaultOptions()
+	opts.Store = store
+	res, err := Compress(msgs, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	compressed := res.Messages[1].Content
+	if res.Ratio() < 0.5 {
+		t.Fatalf("items[] shape should crush hard, got %.0f%% (before=%d after=%d)",
+			res.Ratio()*100, res.TokensBefore, res.TokensAfter)
+	}
+	if len(res.Transforms) != 1 || res.Transforms[0].Strategy != "envelope:json_crusher" {
+		t.Fatalf("expected envelope:json_crusher, got %+v", res.Transforms[0].Strategy)
+	}
+
+	// Whole-structure validity: envelope -> stdout string -> inner object ->
+	// items array must all still parse.
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(compressed), &obj); err != nil {
+		t.Fatalf("envelope invalid: %v", err)
+	}
+	var stdout string
+	if err := json.Unmarshal(obj["stdout"], &stdout); err != nil {
+		t.Fatal(err)
+	}
+	var innerObj map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(stdout), &innerObj); err != nil {
+		t.Fatalf("inner kubectl object invalid: %v\n%.300s", err, stdout)
+	}
+	var items []json.RawMessage
+	if err := json.Unmarshal(innerObj["items"], &items); err != nil {
+		t.Fatalf("items array invalid: %v", err)
+	}
+	if string(innerObj["kind"]) != `"List"` {
+		t.Fatalf("sibling field corrupted: %s", innerObj["kind"])
+	}
+
+	// The crashing pod survives as a WHOLE record (not scattered lines).
+	if !strings.Contains(stdout, "CrashLoopBackOff") || !strings.Contains(stdout, "payments-api-7d9f") {
+		t.Fatal("anomalous pod record dropped from compressed view")
+	}
+
+	// Offloaded records round-trip as a valid JSON array of complete pods.
+	hashes := ccr.ExtractHashes(stdout)
+	if len(hashes) != 1 {
+		t.Fatalf("want 1 marker, got %d", len(hashes))
+	}
+	orig, ok := Unzip(store, hashes[0])
+	if !ok {
+		t.Fatal("offloaded records not retrievable")
+	}
+	var dropped []map[string]any
+	if err := json.Unmarshal(orig, &dropped); err != nil || len(dropped) == 0 {
+		t.Fatalf("offloaded content is not a valid array of records: err=%v n=%d", err, len(dropped))
+	}
+	if _, hasMeta := dropped[0]["metadata"]; !hasMeta {
+		t.Fatal("offloaded records are not complete pod objects")
+	}
+
+	// Determinism.
+	res2, _ := Compress(msgs, opts)
+	if res2.Messages[1].Content != compressed {
+		t.Fatal("items[] compression not deterministic")
+	}
+}
+
+// A bare (non-enveloped) kubectl -o json object gets the same treatment at
+// depth 0.
+func TestCompress_BareItemsObject(t *testing.T) {
+	store := ccr.NewMemoryStore(ccr.MemoryConfig{})
+	env := kubectlJSONEnvelope(t, 120)
+	// Extract just the inner object text.
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(env), &obj); err != nil {
+		t.Fatal(err)
+	}
+	var inner string
+	if err := json.Unmarshal(obj["stdout"], &inner); err != nil {
+		t.Fatal(err)
+	}
+
+	msgs := []Message{
+		{Role: RoleUser, Content: "pods?"},
+		{Role: RoleTool, Name: "k8s_api", Content: inner},
+		{Role: RoleAssistant, Content: "x"},
+		{Role: RoleUser, Content: "y"},
+	}
+	opts := DefaultOptions()
+	opts.Store = store
+	res, _ := Compress(msgs, opts)
+
+	if res.Ratio() < 0.5 {
+		t.Fatalf("bare items object should crush, got %.0f%%", res.Ratio()*100)
+	}
+	if !json.Valid([]byte(res.Messages[1].Content)) {
+		t.Fatal("compressed bare object is not valid JSON")
+	}
+	if !strings.Contains(res.Messages[1].Content, "CrashLoopBackOff") {
+		t.Fatal("anomaly dropped")
+	}
+}
+
 // Live-test find (run 004): a runtime size cap cut a 108KB envelope
 // mid-string and appended "[OUTPUT TRUNCATED ...]", breaking the JSON — the
 // envelope path bailed and the mangled blob passed through uncompressed.

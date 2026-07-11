@@ -55,17 +55,13 @@ func Compress(msgs []Message, opts *Options) (*Result, error) {
 			MustKeep: mustKeep,
 			Store:    opts.Store,
 		}
-		// JSON-object envelopes first (tool runners commonly wrap output as
-		// {"stdout": <large text>, ...} on a single line, which defeats
-		// content detection); otherwise route the content directly.
-		cr, ok := compressEnvelope(r, req)
-		if !ok {
-			var err error
-			cr, err = routeOne(r, req)
-			if err != nil {
-				res.TokensAfter += before
-				continue
-			}
+		// routeAny gives JSON objects structure-aware treatment (runner
+		// envelopes, kubectl-style {"items": [...]}, nested combinations)
+		// before falling back to flat detect → route.
+		cr, err := routeAny(r, req, 0)
+		if err != nil {
+			res.TokensAfter += before
+			continue
 		}
 
 		after := tokenize.Estimate(cr.Compressed)

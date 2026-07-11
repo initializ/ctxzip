@@ -12,9 +12,14 @@ import (
 	"github.com/initializ/ctxzip/router"
 )
 
-// envelopeMinFieldChars is the size below which a string field inside a JSON
+// envelopeMinFieldChars is the size below which a field inside a JSON
 // envelope is left alone — the marker overhead isn't worth it.
 const envelopeMinFieldChars = 1024
+
+// maxObjectDepth bounds the JSON-object recursion. Real traffic needs three
+// levels: a runner envelope ({"stdout": ...}) whose string field holds a JSON
+// object (kubectl -o json) whose array field ("items") holds the rows.
+const maxObjectDepth = 3
 
 // routeOne runs the standard detect → route → compress path on one blob.
 func routeOne(r *router.Router, req crush.Request) (crush.Result, error) {
@@ -22,25 +27,40 @@ func routeOne(r *router.Router, req crush.Request) (crush.Result, error) {
 	return r.For(det.Type).Compress(req)
 }
 
-// compressEnvelope handles tool outputs wrapped in a single-line JSON object
-// envelope — the shape CLI/tool runners commonly produce:
+// routeAny compresses one blob, giving JSON objects structure-aware treatment
+// (compressEnvelope) before falling back to the flat detect → route path.
+func routeAny(r *router.Router, req crush.Request, depth int) (crush.Result, error) {
+	if depth < maxObjectDepth {
+		if res, ok := compressEnvelope(r, req, depth); ok {
+			return res, nil
+		}
+	}
+	return routeOne(r, req)
+}
+
+// compressEnvelope handles JSON-object shapes structure-aware, walking the
+// object's top-level fields in order:
 //
-//	{"stdout": "<28 KB of tabular text with \n escapes>", "stderr": "", "exit_code": 0}
+//   - large STRING fields are decoded back to real text (runner envelopes like
+//     {"stdout": "<28 KB with \n escapes>", ...} have zero physical newlines,
+//     defeating every detector — found live) and compressed recursively, so a
+//     string that itself contains a JSON object gets object treatment too;
+//   - large ARRAY fields are compressed as JSON arrays — kubectl -o json is
+//     {"items": [...]}, and row selection keeps anomalous records WHOLE while
+//     offloading the rest as retrievable complete records (found live: the
+//     shape fell through to line-mode text dedup, scattering records);
+//   - large OBJECT fields recurse the same way.
 //
-// Serialized this way, the payload has zero physical newlines and no
-// detectable structure, so every content-aware crusher passes it through
-// (found live: kubectl output through forge's cli_execute never compressed).
-// This walks the object's top-level fields in order, decompresses each large
-// string field back to real text, compresses THAT with the normal routing
-// path, and splices the compressed value back — output remains a valid JSON
-// object with untouched fields byte-identical and key order preserved, so the
-// result is deterministic. Depth is deliberately one level: nested envelopes
-// haven't been observed, and recursion without a cycle guard invites trouble.
+// Spliced non-string values must still be valid JSON or the field is left
+// untouched; string values are re-quoted so any text is safe. Output remains
+// a valid JSON object with untouched fields byte-identical and key order
+// preserved, so the result is deterministic. Recursion is bounded by
+// maxObjectDepth.
 //
 // Returns ok=false when the content is not a JSON object, nothing inside is
 // worth compressing, or anything fails to parse — callers fall back to the
 // direct routing path.
-func compressEnvelope(r *router.Router, req crush.Request) (crush.Result, bool) {
+func compressEnvelope(r *router.Router, req crush.Request, depth int) (crush.Result, bool) {
 	trimmed := strings.TrimSpace(req.Content)
 	if !strings.HasPrefix(trimmed, "{") {
 		return crush.Result{}, false
@@ -80,21 +100,43 @@ func compressEnvelope(r *router.Router, req crush.Request) (crush.Result, bool) 
 		}
 
 		val := []byte(raw)
-		// Only large string values are candidates; everything else is
-		// re-emitted byte-identical.
-		if len(raw) > envelopeMinFieldChars && raw[0] == '"' {
-			var inner string
-			if json.Unmarshal(raw, &inner) == nil && len(inner) >= envelopeMinFieldChars {
-				innerReq := req
-				innerReq.Content = inner
-				if cr, err := routeOne(r, innerReq); err == nil &&
-					cr.Compressed != inner && strings.TrimSpace(cr.Compressed) != "" {
-					if enc, encErr := marshalJSONString(cr.Compressed); encErr == nil {
-						val = enc
-						changed = true
-						markers = append(markers, cr.Markers...)
-						strategy = cr.Strategy
+		// Only large values are candidates; everything else is re-emitted
+		// byte-identical.
+		if len(raw) > envelopeMinFieldChars {
+			switch raw[0] {
+			case '"':
+				// String field: decode to real text, compress recursively
+				// (the text may itself be a JSON object — kubectl -o json
+				// inside a runner envelope), re-quote. Quoting makes any
+				// compressed text safe to splice.
+				var inner string
+				if json.Unmarshal(raw, &inner) == nil && len(inner) >= envelopeMinFieldChars {
+					innerReq := req
+					innerReq.Content = inner
+					if cr, err := routeAny(r, innerReq, depth+1); err == nil &&
+						cr.Compressed != inner && strings.TrimSpace(cr.Compressed) != "" {
+						if enc, encErr := marshalJSONString(cr.Compressed); encErr == nil {
+							val = enc
+							changed = true
+							markers = append(markers, cr.Markers...)
+							strategy = cr.Strategy
+						}
 					}
+				}
+			case '[', '{':
+				// Array or object field: compress the raw JSON text
+				// recursively (arrays detect as JSONArray and get whole-row
+				// selection; objects recurse here). Spliced UNQUOTED, so the
+				// result must still be valid JSON — a fallback text-crush of
+				// an object field would corrupt the parent and is rejected.
+				innerReq := req
+				innerReq.Content = string(raw)
+				if cr, err := routeAny(r, innerReq, depth+1); err == nil &&
+					cr.Compressed != string(raw) && json.Valid([]byte(cr.Compressed)) {
+					val = []byte(cr.Compressed)
+					changed = true
+					markers = append(markers, cr.Markers...)
+					strategy = cr.Strategy
 				}
 			}
 		}
@@ -124,6 +166,9 @@ func compressEnvelope(r *router.Router, req crush.Request) (crush.Result, bool) 
 	}
 
 	b.WriteByte('}')
+	// Nested envelopes would otherwise stack prefixes
+	// ("envelope:envelope:json_crusher"); keep one.
+	strategy = strings.TrimPrefix(strategy, "envelope:")
 	return crush.Result{
 		Compressed: b.String(),
 		Strategy:   "envelope:" + strategy,
@@ -170,7 +215,7 @@ func salvageTruncatedEnvelope(r *router.Router, req crush.Request, b *strings.Bu
 
 	innerReq := req
 	innerReq.Content = inner
-	cr, err := routeOne(r, innerReq)
+	cr, err := routeAny(r, innerReq, 1)
 	if err != nil || strings.TrimSpace(cr.Compressed) == "" {
 		return crush.Result{}, false
 	}
