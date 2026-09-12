@@ -23,9 +23,9 @@ const hashHexLen = 12
 
 var markerRe = regexp.MustCompile(`<<ctxzip:([0-9a-f]{12,64})(?:[ ,][^>]*)?>>`)
 
-// Hash returns the content-addressed key for b: the first 24 hex chars of its
-// SHA-256 digest. The same bytes always produce the same key, which is what
-// lets a marker and its store entry stay in sync.
+// Hash returns the content-addressed key for b: the first hashHexLen (12) hex
+// chars of its SHA-256 digest. The same bytes always produce the same key,
+// which is what lets a marker and its store entry stay in sync.
 func Hash(b []byte) string {
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])[:hashHexLen]
