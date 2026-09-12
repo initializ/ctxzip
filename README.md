@@ -97,6 +97,8 @@ Compress(msgs)
   ├─ route to a crusher
   │    JSONCrusher   — keep head/tail, errors, query matches; dedup; drop the rest
   │    LogCrusher    — keep error lines, head/tail; drop blank/duplicate noise
+  │    DiffCrusher   — keep +/- lines and headers; trim context; drop low-churn
+  │                    hunks/files past a cap (error/query hunks always kept)
   │    TextCrusher   — line mode: dedup near-identical lines (numeric-insensitive)
   │                    prose mode: extractive BM25 sentence selection, verbatim only
   │
@@ -212,7 +214,7 @@ requiring every skill/prompt author to document compression.
 | `ctxzip` | `Compress`, `Unzip`, `Message` / `Options` / `Result` |
 | `detect` | content-type detection (heuristic cascade, most-specific first) |
 | `router` | content type → crusher |
-| `crush` | `JSONCrusher`, `LogCrusher`, `TextCrusher`, relevance/BM25, error floor |
+| `crush` | `JSONCrusher`, `LogCrusher`, `DiffCrusher`, `TextCrusher`, relevance/BM25, error floor |
 | `ccr` | `Store` interface, `MemoryStore`, `BoltStore`, hashing, marker grammar |
 | `tokenize` | approximate token counting (CJK-aware; deliberately estimates high) |
 | `cmd/ctxzip-demo` | pipe-anything demo CLI |
@@ -232,6 +234,10 @@ Shipped:
 - [x] YAML/describe crusher — indentation-tree folding of boring subtrees
       (managedFields, env lists, long scalar values) with per-subtree
       markers; error-floor/query-protected sections never fold
+- [x] unified-diff crusher — keeps every +/- line and file/hunk header,
+      trims context to a window, and offloads low-churn hunks/files past a
+      cap; the error floor protects any hunk mentioning an error, query, or
+      MustKeep term (output reads as a skeleton, not an appliable patch)
 - [x] line-mode text compression (grep/log layout preserved byte-faithfully)
 - [x] durable `BoltStore` (restart-safe originals)
 - [x] caller `MustKeep` vocabulary + extended k8s error floor
@@ -241,7 +247,7 @@ Shipped:
 
 Planned:
 
-- [ ] dedicated diff / search / code (AST, build-tagged tree-sitter) crushers
+- [ ] dedicated search / code (AST, build-tagged tree-sitter) crushers
 - [ ] richer categorical drop summaries ("149 Running, 3 error-like") in markers
 - [ ] optional ML prose path behind the same `Compressor` interface
 - [ ] retrieval-mined `MustKeep` suggestions (every expansion is a signal that

@@ -14,7 +14,7 @@ func TestRouter_For(t *testing.T) {
 		detect.YAMLLike:      "yaml_crusher",
 		detect.PlainText:     "text_extractive",
 		detect.SearchResults: "text_extractive",
-		detect.GitDiff:       "text_extractive",
+		detect.GitDiff:       "diff_crusher",
 		detect.SourceCode:    "text_extractive",
 	}
 	for ct, want := range cases {
