@@ -240,9 +240,10 @@ Shipped:
       cap; the error floor protects any hunk mentioning an error, query, or
       MustKeep term (output reads as a skeleton, not an appliable patch)
 - [x] pluggable relevance `Scorer` — hybrid BM25 + matched-term boost by
-      default (floors any keyword match clear of the zero-score noise, fixing
-      BM25's weakness on short single-term hits), with an interface seam a
-      future embedding scorer slots into
+      default: floors any keyword match and promotes multi-term matches, fixing
+      BM25's weakness on short single-term hits for threshold-based selectors
+      (the upcoming search crusher). An interface seam a future embedding
+      scorer slots into
 - [x] line-mode text compression (grep/log layout preserved byte-faithfully)
 - [x] durable `BoltStore` (restart-safe originals)
 - [x] caller `MustKeep` vocabulary + extended k8s error floor
