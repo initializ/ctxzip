@@ -100,7 +100,8 @@ Compress(msgs)
   │    DiffCrusher   — keep +/- lines and headers; trim context; drop low-churn
   │                    hunks/files past a cap (error/query hunks always kept)
   │    TextCrusher   — line mode: dedup near-identical lines (numeric-insensitive)
-  │                    prose mode: extractive BM25 sentence selection, verbatim only
+  │                    prose mode: extractive sentence selection (hybrid
+  │                    BM25 + matched-term boost), verbatim only
   │
   ├─ every drop → SHA-256 hash → ccr.Store → inline <<ctxzip:HASH note>> marker
   │
@@ -214,7 +215,7 @@ requiring every skill/prompt author to document compression.
 | `ctxzip` | `Compress`, `Unzip`, `Message` / `Options` / `Result` |
 | `detect` | content-type detection (heuristic cascade, most-specific first) |
 | `router` | content type → crusher |
-| `crush` | `JSONCrusher`, `LogCrusher`, `DiffCrusher`, `TextCrusher`, relevance/BM25, error floor |
+| `crush` | `JSONCrusher`, `LogCrusher`, `DiffCrusher`, `TextCrusher`, `Scorer` (hybrid BM25), error floor |
 | `ccr` | `Store` interface, `MemoryStore`, `BoltStore`, hashing, marker grammar |
 | `tokenize` | approximate token counting (CJK-aware; deliberately estimates high) |
 | `cmd/ctxzip-demo` | pipe-anything demo CLI |
@@ -238,6 +239,11 @@ Shipped:
       trims context to a window, and offloads low-churn hunks/files past a
       cap; the error floor protects any hunk mentioning an error, query, or
       MustKeep term (output reads as a skeleton, not an appliable patch)
+- [x] pluggable relevance `Scorer` — hybrid BM25 + matched-term boost by
+      default: floors any keyword match and promotes multi-term matches, fixing
+      BM25's weakness on short single-term hits for threshold-based selectors
+      (the upcoming search crusher). An interface seam a future embedding
+      scorer slots into
 - [x] line-mode text compression (grep/log layout preserved byte-faithfully)
 - [x] durable `BoltStore` (restart-safe originals)
 - [x] caller `MustKeep` vocabulary + extended k8s error floor
@@ -250,6 +256,8 @@ Planned:
 - [ ] dedicated search / code (AST, build-tagged tree-sitter) crushers
 - [ ] richer categorical drop summaries ("149 Running, 3 error-like") in markers
 - [ ] optional ML prose path behind the same `Compressor` interface
+- [ ] optional embedding relevance scorer (build-tagged) fused with BM25
+      through the `Scorer` interface
 - [ ] retrieval-mined `MustKeep` suggestions (every expansion is a signal that
       compression dropped something needed)
 

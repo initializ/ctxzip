@@ -31,6 +31,9 @@ type TextCrusher struct {
 	// DupThreshold is the Jaccard similarity above which a sentence is a near
 	// duplicate (no-query mode).
 	DupThreshold float64
+	// Scorer ranks sentences in query mode. Defaults to HybridScorer (BM25 with
+	// a matched-term boost) when nil, so a zero-value TextCrusher still works.
+	Scorer Scorer
 }
 
 // NewTextCrusher returns a TextCrusher with sensible defaults.
@@ -42,7 +45,17 @@ func NewTextCrusher() *TextCrusher {
 		TailKeep:        1,
 		TargetKeepRatio: 0.5,
 		DupThreshold:    0.8,
+		Scorer:          NewHybridScorer(),
 	}
+}
+
+// scorer returns the configured Scorer, falling back to the hybrid default so a
+// directly-constructed TextCrusher{} is safe.
+func (c *TextCrusher) scorer() Scorer {
+	if c.Scorer == nil {
+		return NewHybridScorer()
+	}
+	return c.Scorer
 }
 
 // Name implements Compressor.
@@ -221,14 +234,15 @@ func labelFromSig(sig string) string {
 	return strings.Join(words, " ")
 }
 
-// selectByRelevance keeps the highest-BM25 sentences up to the target budget,
-// filling any shortfall by original order so it never over-drops.
+// selectByRelevance keeps the highest-scoring sentences up to the target
+// budget, filling any shortfall by original order so it never over-drops.
+// Relevance comes from the configured Scorer (hybrid BM25+boost by default).
 func (c *TextCrusher) selectByRelevance(sents []string, terms []string, keep []bool, mark func(int), kept *int) {
 	docs := make([][]string, len(sents))
 	for i, s := range sents {
 		docs[i] = tokenizeWords(s)
 	}
-	m := newBM25(docs)
+	scores := c.scorer().Scores(terms, docs)
 
 	type scored struct {
 		idx   int
@@ -239,7 +253,7 @@ func (c *TextCrusher) selectByRelevance(sents []string, terms []string, keep []b
 		if keep[i] {
 			continue
 		}
-		ranked = append(ranked, scored{i, m.score(terms, i)})
+		ranked = append(ranked, scored{i, scores[i]})
 	}
 	sort.SliceStable(ranked, func(a, b int) bool { return ranked[a].score > ranked[b].score })
 
