@@ -99,8 +99,9 @@ Compress(msgs)
   │    LogCrusher    — keep error lines, head/tail; drop blank/duplicate noise
   │    DiffCrusher   — keep +/- lines and headers; trim context; drop low-churn
   │                    hunks/files past a cap (error/query hunks always kept)
-  │    SearchCrusher — group matches by file (path shown once); keep first/last
-  │                    + top-scored + errors; offload the rest per file
+  │    SearchCrusher — group grep matches + context by file (path shown once);
+  │                    keep first/last + top-scored + errors; offload the rest,
+  │                    with a redundancy-adaptive global cap
   │    TextCrusher   — line mode: dedup near-identical lines (numeric-insensitive)
   │                    prose mode: extractive sentence selection (hybrid
   │                    BM25 + matched-term boost), verbatim only
@@ -246,11 +247,15 @@ Shipped:
       BM25's weakness on short single-term hits for threshold-based selectors
       (the search crusher). An interface seam a future embedding scorer slots
       into
-- [x] search-results crusher — groups grep-style `path:line:content` matches
-      under one per-file header (path shown once), keeps each file's first/last
-      anchors + top-scored matches + error floor, and offloads the rest; caps
-      per-file, per-run, and by file count. Content-complete (every match shown
-      or retrievable), though grouping regroups line order by design
+- [x] search-results crusher — groups grep output under one per-file header
+      (path shown once), keeps each file's first/last anchors + top-scored
+      matches + error floor, offloads the rest. Multi-tier parser handles
+      `path:line:content` matches, `path-line-content` grep -C context lines,
+      and Windows drive paths (`--` separators / blanks elided as noise); the
+      global cap is redundancy-adaptive (a simplified `compute_optimal_k`), so
+      repetitive results aren't padded to the ceiling. Content-complete (every
+      match shown or retrievable byte-for-byte), though grouping regroups line
+      order by design
 - [x] line-mode text compression (grep/log layout preserved byte-faithfully)
 - [x] durable `BoltStore` (restart-safe originals)
 - [x] caller `MustKeep` vocabulary + extended k8s error floor

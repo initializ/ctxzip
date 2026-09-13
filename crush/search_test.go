@@ -12,13 +12,24 @@ func grepLine(path string, line int, content string) string {
 	return fmt.Sprintf("%s:%d:%s", path, line, content)
 }
 
-// reconstructMatches rebuilds the set of "path:line:content" strings implied by
-// a compressed rendering: kept lines under their file header, plus every line
-// in an offloaded blob. It is the content-completeness oracle.
+// triple is the separator-agnostic identity of a match, so a context line
+// stored as "f.go-3-x" and shown as "  3:x" compare equal.
+func triple(path string, line int, content string) string {
+	return fmt.Sprintf("%s\x00%d\x00%s", path, line, content)
+}
+
+// reconstructMatches rebuilds the set of match triples implied by a compressed
+// rendering: kept lines under their file header, plus every line in an offloaded
+// blob. It is the content-completeness oracle.
 func reconstructMatches(t *testing.T, compressed string, store ccr.Store) map[string]bool {
 	t.Helper()
 	set := map[string]bool{}
 	cur := ""
+	add := func(line string) {
+		if p, n, c, ok := parseMatchLine(line); ok {
+			set[triple(p, n, c)] = true
+		}
+	}
 	for _, ln := range strings.Split(compressed, "\n") {
 		switch {
 		case strings.Contains(ln, ccr.MarkerPrefix):
@@ -28,11 +39,11 @@ func reconstructMatches(t *testing.T, compressed string, store ccr.Store) map[st
 					t.Fatalf("marker %s not retrievable", h)
 				}
 				for _, bl := range strings.Split(string(e.Original), "\n") {
-					set[bl] = true
+					add(bl)
 				}
 			}
 		case strings.HasPrefix(ln, "  "):
-			set[cur+":"+ln[2:]] = true // "  line:content" -> path:line:content
+			add(cur + ":" + ln[2:]) // "  line:content" -> path:line:content
 		case strings.HasSuffix(ln, ":"):
 			cur = strings.TrimSuffix(ln, ":")
 		}
@@ -43,7 +54,9 @@ func reconstructMatches(t *testing.T, compressed string, store ccr.Store) map[st
 func inputSet(lines []string) map[string]bool {
 	set := make(map[string]bool, len(lines))
 	for _, l := range lines {
-		set[l] = true
+		if p, n, c, ok := parseMatchLine(l); ok {
+			set[triple(p, n, c)] = true
+		}
 	}
 	return set
 }
@@ -198,6 +211,143 @@ func TestSearchCrusher_NilStore_Passthrough(t *testing.T) {
 	res, _ := c.Compress(Request{Content: in, Store: nil})
 	if res.Compressed != in {
 		t.Fatal("nil store must force lossless passthrough")
+	}
+}
+
+// --- multi-tier parsing (grep -C context, Windows, ambiguous paths) ---
+
+func TestParseMatchLine_Tiers(t *testing.T) {
+	cases := []struct {
+		in      string
+		path    string
+		line    int
+		content string
+	}{
+		{"src/app.go:42:return err", "src/app.go", 42, "return err"},             // colon
+		{"src/app.go-43-next line", "src/app.go", 43, "next line"},               // dash context
+		{`C:\Users\x\main.go:12:content`, `C:\Users\x\main.go`, 12, "content"},   // Windows drive
+		{"logs/2026-05-03/app.log-12-msg", "logs/2026-05-03/app.log", 12, "msg"}, // date in path
+		{"a.py:7:x:y:z", "a.py", 7, "x:y:z"},                                     // colons in content
+	}
+	for _, tc := range cases {
+		p, n, c, ok := parseMatchLine(tc.in)
+		if !ok || p != tc.path || n != tc.line || c != tc.content {
+			t.Errorf("parseMatchLine(%q) = (%q,%d,%q,%v), want (%q,%d,%q,true)",
+				tc.in, p, n, c, ok, tc.path, tc.line, tc.content)
+		}
+	}
+	// Not matches.
+	for _, bad := range []string{"just prose here", "-- ", ":5:no path", "src/app.go:-1:neg"} {
+		if _, _, _, ok := parseMatchLine(bad); ok {
+			t.Errorf("parseMatchLine(%q) parsed but should not", bad)
+		}
+	}
+}
+
+// TestSearchCrusher_GrepContextLines compresses grep -C output (colon matches +
+// dash context + "--" separators) and round-trips it content-complete, with the
+// original separators preserved byte-for-byte in the offloaded blobs.
+func TestSearchCrusher_GrepContextLines(t *testing.T) {
+	store := ccr.NewMemoryStore(ccr.MemoryConfig{})
+	c := NewSearchCrusher()
+	var lines []string // the parseable match/context lines
+	var withNoise []string
+	for i := 0; i < 40; i++ {
+		var ln string
+		if i%5 == 0 {
+			ln = fmt.Sprintf("svc/handler.go:%d:matched call %d", i+1, i) // match
+		} else {
+			ln = fmt.Sprintf("svc/handler.go-%d-context around %d", i+1, i) // context
+		}
+		lines = append(lines, ln)
+		withNoise = append(withNoise, ln)
+		if i%5 == 4 {
+			withNoise = append(withNoise, "--") // grep hunk separator
+		}
+	}
+	in := strings.Join(withNoise, "\n")
+
+	res, err := c.Compress(Request{Content: in, Store: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Compressed == in {
+		t.Fatal("expected grep -C output to compress")
+	}
+	// Content-complete across colon + dash lines.
+	got := reconstructMatches(t, res.Compressed, store)
+	for want := range inputSet(lines) {
+		if !got[want] {
+			t.Fatalf("context/match line lost: %v", want)
+		}
+	}
+	// Offloaded blobs preserve the original dash separators byte-for-byte.
+	sawDash := false
+	for _, h := range res.Markers {
+		e, _ := store.Get(h)
+		if strings.Contains(string(e.Original), "-context around ") {
+			sawDash = true
+		}
+	}
+	if !sawDash {
+		t.Fatal("offloaded blob did not preserve original dash-form context lines")
+	}
+}
+
+// TestSearchCrusher_AdaptiveCapShrinksOnRedundancy checks the adaptive global
+// cap keeps fewer matches when results are near-duplicates than when diverse.
+func TestSearchCrusher_AdaptiveCapShrinksOnRedundancy(t *testing.T) {
+	visibleMatches := func(compressed string) int {
+		n := 0
+		for _, ln := range strings.Split(compressed, "\n") {
+			if strings.HasPrefix(ln, "  ") && !strings.Contains(ln, ccr.MarkerPrefix) {
+				n++
+			}
+		}
+		return n
+	}
+	// 8 files, 6 matches each. Redundant: identical shape. Diverse: text that
+	// varies by WORDS (not digits — the signature is digit-insensitive by
+	// design, so number-only variation still reads as redundant).
+	words := strings.Fields("alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa quebec romeo sierra tango uniform victor whiskey xray yankee zulu")
+	var redundant, diverse []string
+	for f := 0; f < 8; f++ {
+		p := fmt.Sprintf("pkg/f%d.go", f)
+		for i := 0; i < 6; i++ {
+			redundant = append(redundant, fmt.Sprintf("%s:%d:the same constant line", p, i+1))
+			w := words[(f*6+i)%len(words)]
+			diverse = append(diverse, fmt.Sprintf("%s:%d:distinct %s %s clause", p, i+1, w, words[(f+i)%len(words)]))
+		}
+	}
+	rRes, _ := NewSearchCrusher().Compress(Request{Content: strings.Join(redundant, "\n"), Store: ccr.NewMemoryStore(ccr.MemoryConfig{})})
+	dRes, _ := NewSearchCrusher().Compress(Request{Content: strings.Join(diverse, "\n"), Store: ccr.NewMemoryStore(ccr.MemoryConfig{})})
+
+	rKept, dKept := visibleMatches(rRes.Compressed), visibleMatches(dRes.Compressed)
+	if rKept >= dKept {
+		t.Fatalf("adaptive cap did not shrink on redundancy: redundant kept %d, diverse kept %d", rKept, dKept)
+	}
+}
+
+func TestAdaptiveKeepCount(t *testing.T) {
+	small := []string{"a", "b", "c"}
+	if got := adaptiveKeepCount(small, 5, 30); got != 3 {
+		t.Errorf("n<=8 should keep all: got %d", got)
+	}
+	// All identical -> near-total redundancy -> floor to minK.
+	redundant := make([]string, 40)
+	for i := range redundant {
+		redundant[i] = "identical line 5"
+	}
+	if got := adaptiveKeepCount(redundant, 5, 30); got != 5 {
+		t.Errorf("fully redundant should collapse to minK=5, got %d", got)
+	}
+	// All distinct (by words, since the signature ignores digits) -> ceiling.
+	distinct := make([]string, 40)
+	for i := range distinct {
+		distinct[i] = fmt.Sprintf("unique word %c%c here", 'a'+i/26, 'a'+i%26)
+	}
+	if got := adaptiveKeepCount(distinct, 5, 30); got != 30 {
+		t.Errorf("fully diverse should hit ceiling 30, got %d", got)
 	}
 }
 
