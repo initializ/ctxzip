@@ -99,6 +99,8 @@ Compress(msgs)
   │    LogCrusher    — keep error lines, head/tail; drop blank/duplicate noise
   │    DiffCrusher   — keep +/- lines and headers; trim context; drop low-churn
   │                    hunks/files past a cap (error/query hunks always kept)
+  │    SearchCrusher — group matches by file (path shown once); keep first/last
+  │                    + top-scored + errors; offload the rest per file
   │    TextCrusher   — line mode: dedup near-identical lines (numeric-insensitive)
   │                    prose mode: extractive sentence selection (hybrid
   │                    BM25 + matched-term boost), verbatim only
@@ -215,7 +217,7 @@ requiring every skill/prompt author to document compression.
 | `ctxzip` | `Compress`, `Unzip`, `Message` / `Options` / `Result` |
 | `detect` | content-type detection (heuristic cascade, most-specific first) |
 | `router` | content type → crusher |
-| `crush` | `JSONCrusher`, `LogCrusher`, `DiffCrusher`, `TextCrusher`, `Scorer` (hybrid BM25), error floor |
+| `crush` | `JSONCrusher`, `LogCrusher`, `DiffCrusher`, `SearchCrusher`, `TextCrusher`, `Scorer` (hybrid BM25), error floor |
 | `ccr` | `Store` interface, `MemoryStore`, `BoltStore`, hashing, marker grammar |
 | `tokenize` | approximate token counting (CJK-aware; deliberately estimates high) |
 | `cmd/ctxzip-demo` | pipe-anything demo CLI |
@@ -242,8 +244,13 @@ Shipped:
 - [x] pluggable relevance `Scorer` — hybrid BM25 + matched-term boost by
       default: floors any keyword match and promotes multi-term matches, fixing
       BM25's weakness on short single-term hits for threshold-based selectors
-      (the upcoming search crusher). An interface seam a future embedding
-      scorer slots into
+      (the search crusher). An interface seam a future embedding scorer slots
+      into
+- [x] search-results crusher — groups grep-style `path:line:content` matches
+      under one per-file header (path shown once), keeps each file's first/last
+      anchors + top-scored matches + error floor, and offloads the rest; caps
+      per-file, per-run, and by file count. Content-complete (every match shown
+      or retrievable), though grouping regroups line order by design
 - [x] line-mode text compression (grep/log layout preserved byte-faithfully)
 - [x] durable `BoltStore` (restart-safe originals)
 - [x] caller `MustKeep` vocabulary + extended k8s error floor
@@ -253,7 +260,7 @@ Shipped:
 
 Planned:
 
-- [ ] dedicated search / code (AST, build-tagged tree-sitter) crushers
+- [ ] dedicated code crusher (AST, build-tagged tree-sitter)
 - [ ] richer categorical drop summaries ("149 Running, 3 error-like") in markers
 - [ ] optional ML prose path behind the same `Compressor` interface
 - [ ] optional embedding relevance scorer (build-tagged) fused with BM25

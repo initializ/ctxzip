@@ -10,21 +10,23 @@ import (
 
 // Router selects a compressor for a content type.
 type Router struct {
-	json *crush.JSONCrusher
-	log  *crush.LogCrusher
-	text *crush.TextCrusher
-	yaml *crush.YAMLCrusher
-	diff *crush.DiffCrusher
+	json   *crush.JSONCrusher
+	log    *crush.LogCrusher
+	text   *crush.TextCrusher
+	yaml   *crush.YAMLCrusher
+	diff   *crush.DiffCrusher
+	search *crush.SearchCrusher
 }
 
 // New builds a Router with the default compressors.
 func New() *Router {
 	return &Router{
-		json: crush.NewJSONCrusher(),
-		log:  crush.NewLogCrusher(),
-		text: crush.NewTextCrusher(),
-		yaml: crush.NewYAMLCrusher(),
-		diff: crush.NewDiffCrusher(),
+		json:   crush.NewJSONCrusher(),
+		log:    crush.NewLogCrusher(),
+		text:   crush.NewTextCrusher(),
+		yaml:   crush.NewYAMLCrusher(),
+		diff:   crush.NewDiffCrusher(),
+		search: crush.NewSearchCrusher(),
 	}
 }
 
@@ -38,9 +40,9 @@ func (r *Router) For(ct detect.ContentType) crush.Compressor {
 		return r.log
 	case detect.YAMLLike:
 		return r.yaml
-	case detect.PlainText, detect.SearchResults:
-		// Prose and search output both compress acceptably with extractive
-		// sentence/line selection until dedicated crushers land.
+	case detect.SearchResults:
+		return r.search
+	case detect.PlainText:
 		return r.text
 	case detect.GitDiff:
 		return r.diff
