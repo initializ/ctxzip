@@ -39,13 +39,29 @@ type CodeCrusher struct {
 	MinBodyLines int
 	// MinLines is the file size (in newlines) below which it is left alone.
 	MinLines int
-	// text is the fallback for languages the AST path doesn't handle.
+	// Fallback compresses source the Go AST path does not handle (non-Go, a
+	// package-less snippet, or unparseable input). When nil, an extractive text
+	// crusher is used — the same strategy SourceCode used before this crusher,
+	// so no language regresses. A tree-sitter-backed crusher (the ctxzip/codelang
+	// module) can be injected here to give Python/TS/JS/Java/C/C++ the same
+	// signature-keeping, body-eliding treatment Go gets. Must implement the same
+	// invariants (fail-open, reversible, deterministic).
+	Fallback Compressor
+	// text is the default fallback.
 	text *TextCrusher
 }
 
 // NewCodeCrusher returns a CodeCrusher with sensible defaults.
 func NewCodeCrusher() *CodeCrusher {
 	return &CodeCrusher{MinBodyLines: 3, MinLines: 15, text: NewTextCrusher()}
+}
+
+// fallback returns the injected Fallback, or the default text crusher.
+func (c *CodeCrusher) fallback() Compressor {
+	if c.Fallback != nil {
+		return c.Fallback
+	}
+	return c.text
 }
 
 // Name implements Compressor.
@@ -59,10 +75,9 @@ func (c *CodeCrusher) Compress(req Request) (Result, error) {
 	if res, ok := c.compressGo(req); ok {
 		return res, nil
 	}
-	// Non-Go, a bare snippet (no package clause), or unparseable: fall back to
-	// extractive text — the same strategy SourceCode used before, so no
-	// language loses the compression it had.
-	return c.text.Compress(req)
+	// Non-Go, a bare snippet (no package clause), or unparseable: hand off to the
+	// fallback (a tree-sitter crusher if injected, else extractive text).
+	return c.fallback().Compress(req)
 }
 
 // compressGo elides the bodies of top-level Go functions and methods. ok is

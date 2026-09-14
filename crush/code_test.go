@@ -161,6 +161,36 @@ func TestCodeCrusher_SnippetNoPackageFallsBack(t *testing.T) {
 	}
 }
 
+// fakeFallback records whether it was invoked, standing in for the injectable
+// tree-sitter crusher.
+type fakeFallback struct{ called bool }
+
+func (f *fakeFallback) Name() string { return "fake_fallback" }
+func (f *fakeFallback) Compress(req Request) (Result, error) {
+	f.called = true
+	return Result{Compressed: "FALLBACK", Strategy: f.Name()}, nil
+}
+
+func TestCodeCrusher_FallbackSeam(t *testing.T) {
+	store := ccr.NewMemoryStore(ccr.MemoryConfig{})
+	fb := &fakeFallback{}
+	c := NewCodeCrusher()
+	c.Fallback = fb
+
+	// Non-Go input routes to the injected fallback...
+	nonGo := "def f():\n" + strings.Repeat("    x = 1\n", 20)
+	res, _ := c.Compress(Request{Content: nonGo, Store: store})
+	if !fb.called || res.Strategy != "fake_fallback" {
+		t.Fatal("non-Go input did not route to the injected Fallback")
+	}
+	// ...but Go still uses the native AST path, not the fallback.
+	fb.called = false
+	res, _ = c.Compress(Request{Content: goSource, Store: store})
+	if fb.called || res.Strategy != "code_crusher" {
+		t.Fatal("Go input should use the AST path, not the fallback")
+	}
+}
+
 func TestCodeCrusher_Deterministic(t *testing.T) {
 	r1, _ := NewCodeCrusher().Compress(Request{Content: goSource, Store: ccr.NewMemoryStore(ccr.MemoryConfig{})})
 	r2, _ := NewCodeCrusher().Compress(Request{Content: goSource, Store: ccr.NewMemoryStore(ccr.MemoryConfig{})})
