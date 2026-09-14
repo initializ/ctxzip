@@ -1,0 +1,32 @@
+name: security-scan
+
+# Grype vulnerability scan on every PR (and pushes to the integration branches).
+# Fails on a HIGH or CRITICAL vuln that HAS a fix (only-fixed) — un-actionable
+# no-fix advisories don't block. Findings also land in the Security tab (SARIF).
+on:
+  pull_request:
+  push:
+    branches: [develop, main]
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  grype:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: scan
+        uses: anchore/scan-action@v6
+        with:
+          path: "."
+          fail-build: true
+          severity-cutoff: high
+          only-fixed: true
+      - name: Upload SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: ${{ steps.scan.outputs.sarif }}
+          category: grype
