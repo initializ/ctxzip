@@ -283,18 +283,33 @@ Shipped:
 - [x] forge adapter (hook + client wrapper + `context_expand` + provider
       prompt-cache hints + audit events) — lives in the forge repo
 
-Planned:
+Planned (next, in rough priority):
 
+- [ ] Redis `ccr.Store` backend — a shared, multi-worker store (separate
+      `store/redis` module, pure-Go `go-redis`, native per-key TTL) for
+      proxy/agent fleets that `BoltStore`'s single-node file lock can't serve.
+      Pure-Go, no operational weight — the clear next step.
+- [ ] optional embedding relevance scorer — fills `HybridScorer.Embed` for
+      semantic ranking (matches on meaning, not just keywords). Opt-in module
+      (~30 MB ONNX); a modest quality gain on paraphrase/semantic queries.
 - [ ] code crusher — more tree-sitter languages (Rust, Ruby, Kotlin, …) in the
       `codelang` module; score-aware body budgeting
 - [ ] categorical drop summaries for the remaining crushers where they'd help
       (e.g. a log-level breakdown "32 info, 6 debug, 2 warn") — the high-value
       JSON/table cases already ship above
-- [ ] optional ML prose path behind the same `Compressor` interface
-- [ ] optional embedding relevance scorer (build-tagged) fused with BM25
-      through the `Scorer` interface
 - [ ] retrieval-mined `MustKeep` suggestions (every expansion is a signal that
       compression dropped something needed)
+
+Deferred (low ROI for this project):
+
+- [ ] ML prose path (a Kompress/ModernBERT-style learned compressor). Measured
+      against our own extractive `TextCrusher` it's not a win: on real prose the
+      learned model compresses *less* (headroom's own benchmarks: ~6–24% vs the
+      extractive ~50%), while adding real weight — ONNX Runtime + CGO, ~40–150 MB
+      model downloads, hundreds of MB RAM, ms-scale latency, and an AVX2
+      requirement. Its one genuine niche, reasoning-trace compaction, is a no-op
+      for Claude/OpenAI. Kept behind the same opt-in-module boundary if ever
+      built, so the core stays pure-Go and fast either way.
 
 ## Development
 
