@@ -15,7 +15,7 @@ func TestRouter_For(t *testing.T) {
 		detect.PlainText:     "text_extractive",
 		detect.SearchResults: "search_crusher",
 		detect.GitDiff:       "diff_crusher",
-		detect.SourceCode:    "text_extractive",
+		detect.SourceCode:    "code_crusher",
 	}
 	for ct, want := range cases {
 		if got := r.For(ct).Name(); got != want {

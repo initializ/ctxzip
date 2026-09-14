@@ -102,6 +102,9 @@ Compress(msgs)
   │    SearchCrusher — group grep matches + context by file (path shown once);
   │                    keep first/last + top-scored + errors; offload the rest,
   │                    with a redundancy-adaptive global cap
+  │    CodeCrusher   — Go (go/ast): keep package/imports/types/signatures,
+  │                    elide function bodies; Python/TS/JS/Java/C/C++ via the
+  │                    optional tree-sitter codelang module; else → text
   │    TextCrusher   — line mode: dedup near-identical lines (numeric-insensitive)
   │                    prose mode: extractive sentence selection (hybrid
   │                    BM25 + matched-term boost), verbatim only
@@ -218,10 +221,11 @@ requiring every skill/prompt author to document compression.
 | `ctxzip` | `Compress`, `Unzip`, `Message` / `Options` / `Result` |
 | `detect` | content-type detection (heuristic cascade, most-specific first) |
 | `router` | content type → crusher |
-| `crush` | `JSONCrusher`, `LogCrusher`, `DiffCrusher`, `SearchCrusher`, `TextCrusher`, `Scorer` (hybrid BM25), error floor |
+| `crush` | `JSONCrusher`, `LogCrusher`, `DiffCrusher`, `SearchCrusher`, `CodeCrusher`, `TextCrusher`, `Scorer` (hybrid BM25), error floor |
 | `ccr` | `Store` interface, `MemoryStore`, `BoltStore`, hashing, marker grammar |
 | `tokenize` | approximate token counting (CJK-aware; deliberately estimates high) |
 | `cmd/ctxzip-demo` | pipe-anything demo CLI |
+| `codelang` | optional tree-sitter Tier B code crusher (Python/TS/JS/Java/C/C++) — separate module (CGO) |
 
 Design invariants, enforced by tests: non-empty input never compresses to empty
 output; the caller's message slice is never mutated; a failed or unprofitable
@@ -256,6 +260,17 @@ Shipped:
       repetitive results aren't padded to the ceiling. Content-complete (every
       match shown or retrievable byte-for-byte), though grouping regroups line
       order by design
+- [x] code crusher — keeps package clause, imports, type/const/var decls, and
+      every function signature, and elides function bodies (position-preserving,
+      byte-exact round-trip on expansion). The generic error floor is
+      intentionally not applied to code (Go bodies are saturated with "error");
+      MustKeep and query terms still protect a body.
+      - **Tier A** (core, no third-party dep): Go via the stdlib `go/parser`+`go/ast`.
+      - **Tier B** (optional [`codelang`](codelang) module): Python / TypeScript /
+        JavaScript / Java / C / C++ via tree-sitter, wired through
+        `CodeCrusher.Fallback`. Isolated in its own module so the core stays
+        dependency-light (CGO + grammars only where wanted). Other languages
+        still fall back to extractive text, so nothing regresses
 - [x] line-mode text compression (grep/log layout preserved byte-faithfully)
 - [x] durable `BoltStore` (restart-safe originals)
 - [x] caller `MustKeep` vocabulary + extended k8s error floor
@@ -265,7 +280,8 @@ Shipped:
 
 Planned:
 
-- [ ] dedicated code crusher (AST, build-tagged tree-sitter)
+- [ ] code crusher — more tree-sitter languages (Rust, Ruby, Kotlin, …) in the
+      `codelang` module; score-aware body budgeting
 - [ ] richer categorical drop summaries ("149 Running, 3 error-like") in markers
 - [ ] optional ML prose path behind the same `Compressor` interface
 - [ ] optional embedding relevance scorer (build-tagged) fused with BM25
