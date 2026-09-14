@@ -1,0 +1,67 @@
+name: security-scan
+
+# Grype vulnerability scan on every PR (and pushes to the integration branches).
+# Fails on a HIGH or CRITICAL vuln that HAS a fix (only-fixed) — un-actionable
+# no-fix advisories don't block. All fixable findings post as a sticky PR-comment
+# table; the SARIF upload is best-effort (needs GHAS code scanning, absent on
+# private repos).
+on:
+  pull_request:
+  push:
+    branches: [develop, main]
+
+permissions:
+  contents: read
+  security-events: write
+  pull-requests: write
+
+jobs:
+  grype:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: scan
+        uses: anchore/scan-action@v6
+        with:
+          path: "."
+          fail-build: true
+          severity-cutoff: high
+          only-fixed: true
+      - name: Upload SARIF
+        if: always()
+        continue-on-error: true  # needs GHAS code scanning; best-effort so a private repo without it does not red the check
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: ${{ steps.scan.outputs.sarif }}
+          category: grype
+      - name: Render grype table
+        if: always() && github.event_name == 'pull_request'
+        continue-on-error: true
+        env:
+          GRYPE_VERSION: v0.97.1
+        run: |
+          curl -sSfL "https://raw.githubusercontent.com/anchore/grype/${GRYPE_VERSION}/install.sh" | sh -s -- -b "$RUNNER_TEMP" "$GRYPE_VERSION"
+          "$RUNNER_TEMP/grype" dir:. --only-fixed -q -o json > "$RUNNER_TEMP/grype.json" 2>/dev/null || echo '{"matches":[]}' > "$RUNNER_TEMP/grype.json"
+          n=$(jq '.matches | length' "$RUNNER_TEMP/grype.json")
+          {
+            if [ "$n" -eq 0 ]; then
+              echo "### 🔎 Grype — no fixable vulnerabilities ✅"
+            else
+              echo "### 🔎 Grype — $n fixable finding(s)"
+              echo
+              jq -r '
+                "| Name | Installed | Fixed In | Type | Vulnerability | Severity | EPSS | Risk |",
+                "| --- | --- | --- | --- | --- | --- | --- | --- |",
+                (.matches[] | "| \(.artifact.name) | \(.artifact.version) | \((.vulnerability.fix.versions // []) | join(", ")) | \(.artifact.type) | \(.vulnerability.id) | \(.vulnerability.severity) | \((.vulnerability.epss[0].epss // null) | if . == null then "N/A" else ((. * 1000 | round / 10) | tostring) + "%" end) | \((.vulnerability.risk // 0) * 10 | round / 10) |")
+              ' "$RUNNER_TEMP/grype.json"
+              echo
+              echo "_HIGH+ with a fix fail the check; lower severities shown for visibility._"
+            fi
+          } > grype-report.txt
+      - name: Post findings on PR
+        if: always() && github.event_name == 'pull_request'
+        continue-on-error: true
+        uses: marocchino/sticky-pull-request-comment@5770ad5eb8f42dd2c4f34da00c94c5381e49af88 # v3.0.5
+        with:
+          header: grype
+          path: grype-report.txt

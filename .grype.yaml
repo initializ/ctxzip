@@ -1,0 +1,5 @@
+# Grype config for the security-scan CI + local `grype dir:.`.
+# Exclude installed node_modules: prebuilt tool binaries (e.g. esbuild) generate
+# un-actionable stdlib CVEs; the real npm dependency surface comes from lockfiles.
+exclude:
+  - "./**/node_modules/**"
