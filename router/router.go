@@ -16,6 +16,7 @@ type Router struct {
 	yaml   *crush.YAMLCrusher
 	diff   *crush.DiffCrusher
 	search *crush.SearchCrusher
+	code   *crush.CodeCrusher
 }
 
 // New builds a Router with the default compressors.
@@ -27,6 +28,7 @@ func New() *Router {
 		yaml:   crush.NewYAMLCrusher(),
 		diff:   crush.NewDiffCrusher(),
 		search: crush.NewSearchCrusher(),
+		code:   crush.NewCodeCrusher(),
 	}
 }
 
@@ -47,9 +49,7 @@ func (r *Router) For(ct detect.ContentType) crush.Compressor {
 	case detect.GitDiff:
 		return r.diff
 	case detect.SourceCode:
-		// TODO: dedicated AST crusher. Route to extractive text for now —
-		// it only drops near-duplicate lines without a query, so it is safe.
-		return r.text
+		return r.code
 	default:
 		return r.text
 	}

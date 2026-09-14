@@ -102,6 +102,8 @@ Compress(msgs)
   │    SearchCrusher — group grep matches + context by file (path shown once);
   │                    keep first/last + top-scored + errors; offload the rest,
   │                    with a redundancy-adaptive global cap
+  │    CodeCrusher   — Go (go/ast): keep package/imports/types/signatures,
+  │                    elide function bodies; other langs → extractive text
   │    TextCrusher   — line mode: dedup near-identical lines (numeric-insensitive)
   │                    prose mode: extractive sentence selection (hybrid
   │                    BM25 + matched-term boost), verbatim only
@@ -218,7 +220,7 @@ requiring every skill/prompt author to document compression.
 | `ctxzip` | `Compress`, `Unzip`, `Message` / `Options` / `Result` |
 | `detect` | content-type detection (heuristic cascade, most-specific first) |
 | `router` | content type → crusher |
-| `crush` | `JSONCrusher`, `LogCrusher`, `DiffCrusher`, `SearchCrusher`, `TextCrusher`, `Scorer` (hybrid BM25), error floor |
+| `crush` | `JSONCrusher`, `LogCrusher`, `DiffCrusher`, `SearchCrusher`, `CodeCrusher`, `TextCrusher`, `Scorer` (hybrid BM25), error floor |
 | `ccr` | `Store` interface, `MemoryStore`, `BoltStore`, hashing, marker grammar |
 | `tokenize` | approximate token counting (CJK-aware; deliberately estimates high) |
 | `cmd/ctxzip-demo` | pipe-anything demo CLI |
@@ -256,6 +258,13 @@ Shipped:
       repetitive results aren't padded to the ceiling. Content-complete (every
       match shown or retrievable byte-for-byte), though grouping regroups line
       order by design
+- [x] code crusher (Tier A) — Go source via the stdlib `go/parser`+`go/ast`
+      (no third-party dep): keeps package clause, imports, type/const/var decls,
+      and every function signature, and elides function bodies (position-
+      preserving, byte-exact round-trip on expansion). Other languages fall back
+      to extractive text, so nothing regresses. The generic error floor is
+      intentionally not applied to code (Go bodies are saturated with "error");
+      MustKeep and query terms still protect a body
 - [x] line-mode text compression (grep/log layout preserved byte-faithfully)
 - [x] durable `BoltStore` (restart-safe originals)
 - [x] caller `MustKeep` vocabulary + extended k8s error floor
@@ -265,7 +274,8 @@ Shipped:
 
 Planned:
 
-- [ ] dedicated code crusher (AST, build-tagged tree-sitter)
+- [ ] code crusher Tier B — build-tagged tree-sitter for non-Go languages
+      (Python/JS/TS/Rust/Java/C/C++), replacing the text fallback
 - [ ] richer categorical drop summaries ("149 Running, 3 error-like") in markers
 - [ ] optional ML prose path behind the same `Compressor` interface
 - [ ] optional embedding relevance scorer (build-tagged) fused with BM25
