@@ -97,9 +97,7 @@ func (c *SearchCrusher) Compress(req Request) (Result, error) {
 		var dropped []*searchMatch
 		for _, m := range f.matches {
 			if m.keep {
-				// "  <line>:<content>" — no space after the colon, so content is
-				// byte-preserved and the full line reconstructs exactly.
-				out = append(out, "  "+strconv.Itoa(m.line)+":"+m.content)
+				out = append(out, keptLine(f.path, m))
 			} else {
 				dropped = append(dropped, m)
 			}
@@ -279,7 +277,7 @@ func (c *SearchCrusher) emitOffload(req Request, out []string, path string, drop
 	}
 	// Fail-open: show the dropped matches verbatim rather than lose them.
 	for _, sm := range dropped {
-		out = append(out, "  "+strconv.Itoa(sm.line)+":"+sm.content)
+		out = append(out, keptLine(path, sm))
 	}
 	return out
 }
@@ -303,7 +301,7 @@ func (c *SearchCrusher) emitDroppedFiles(req Request, out []string, files []*sea
 	for _, f := range files {
 		out = append(out, f.path+":")
 		for _, sm := range f.matches {
-			out = append(out, "  "+strconv.Itoa(sm.line)+":"+sm.content)
+			out = append(out, keptLine(f.path, sm))
 		}
 	}
 	return out
@@ -323,6 +321,15 @@ func (c *SearchCrusher) offload(req Request, blob string, items int, note string
 	}
 	*markers = append(*markers, hash)
 	return ccr.Marker(hash, note), true
+}
+
+// keptLine renders a shown match with its file's path stripped but its ORIGINAL
+// line→content separator preserved (colon for a match, dash for a grep -C
+// context line), by slicing the raw line after "path<sep>". So a kept line is
+// byte-faithful — which matters for context anchors that are kept, not offloaded,
+// and would otherwise be recoverable nowhere.
+func keptLine(path string, m *searchMatch) string {
+	return "  " + m.raw[len(path)+1:]
 }
 
 // rawLines joins matches' exact original lines, line-number ascending, so an

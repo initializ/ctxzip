@@ -294,6 +294,43 @@ func TestSearchCrusher_GrepContextLines(t *testing.T) {
 	}
 }
 
+// TestSearchCrusher_KeptContextLinePreservesSeparator guards byte-fidelity of
+// *kept* grep -C context lines: a dash-separated context line that survives as a
+// file anchor must be shown verbatim (dash preserved), not recolored to a colon
+// — because a kept line, unlike an offloaded one, is recoverable nowhere else.
+func TestSearchCrusher_KeptContextLinePreservesSeparator(t *testing.T) {
+	store := ccr.NewMemoryStore(ccr.MemoryConfig{})
+	c := NewSearchCrusher()
+	lines := []string{"svc/h.go-1-context BEFORE first match"} // first anchor: dash context
+	for i := 2; i <= 11; i++ {
+		lines = append(lines, fmt.Sprintf("svc/h.go:%d:match number %d", i, i))
+	}
+	lines = append(lines, "svc/h.go-12-context AFTER last match") // last anchor: dash context
+	in := strings.Join(lines, "\n")
+
+	res, _ := c.Compress(Request{Content: in, Store: store})
+	if res.Compressed == in {
+		t.Fatal("expected compression")
+	}
+	// Kept dash anchors shown verbatim (dash), never recolored to colon.
+	if !strings.Contains(res.Compressed, "  1-context BEFORE first match") {
+		t.Fatalf("first dash-context anchor not shown verbatim:\n%s", res.Compressed)
+	}
+	if !strings.Contains(res.Compressed, "  12-context AFTER last match") {
+		t.Fatalf("last dash-context anchor not shown verbatim:\n%s", res.Compressed)
+	}
+	if strings.Contains(res.Compressed, "  1:context BEFORE") || strings.Contains(res.Compressed, "  12:context AFTER") {
+		t.Fatal("dash-context anchor was recolored to a colon separator")
+	}
+	// And still content-complete.
+	got := reconstructMatches(t, res.Compressed, store)
+	for want := range inputSet(lines) {
+		if !got[want] {
+			t.Fatalf("match lost: %v", want)
+		}
+	}
+}
+
 // TestSearchCrusher_AdaptiveCapShrinksOnRedundancy checks the adaptive global
 // cap keeps fewer matches when results are near-duplicates than when diverse.
 func TestSearchCrusher_AdaptiveCapShrinksOnRedundancy(t *testing.T) {
