@@ -31,12 +31,14 @@ type Detection struct {
 
 var (
 	diffHeaderRe = regexp.MustCompile(`(?m)^(diff --git |--- a/|\+\+\+ b/|@@ )`)
-	// searchRe matches grep-style "path:line:content". The prefix must look like
-	// a file path — a no-space, no-colon token containing a "." "/" or "\" — so
-	// that timestamped log lines like "2026-06-30T10:00:01 ..." (whose "10:00:"
-	// also satisfies ":digits:") are NOT misread as search results and instead
-	// fall through to the log rule.
-	searchRe = regexp.MustCompile(`(?m)^[^\s:]*[./\\][^\s:]*:\d+:`)
+	// searchRe matches grep-style "path:line:content" (matches) and
+	// "path-line-content" (grep -A/-B/-C context lines). The prefix must look
+	// like a file path — a no-space, no-colon token containing a "." "/" or "\"
+	// — so that timestamped log lines like "2026-06-30T10:00:01 ..." (whose
+	// "10:00:" also satisfies ":digits:", and whose dashes could satisfy
+	// "-digits-") are NOT misread as search results: they carry no "." "/" "\"
+	// before the marker, so they fall through to the log rule.
+	searchRe = regexp.MustCompile(`(?m)^[^\s:]*[./\\][^\s:]*[:-]\d+[:-]`)
 	// yamlKeyRe matches YAML-ish "key:" lines — including kubectl describe's
 	// near-YAML (Name:, Node:) and list items ("- name:"). Quoted keys
 	// (pretty-printed JSON) are deliberately excluded by the leading

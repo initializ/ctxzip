@@ -13,7 +13,7 @@ func TestRouter_For(t *testing.T) {
 		detect.BuildLog:      "log_crusher",
 		detect.YAMLLike:      "yaml_crusher",
 		detect.PlainText:     "text_extractive",
-		detect.SearchResults: "text_extractive",
+		detect.SearchResults: "search_crusher",
 		detect.GitDiff:       "diff_crusher",
 		detect.SourceCode:    "text_extractive",
 	}

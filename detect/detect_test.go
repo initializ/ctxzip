@@ -18,6 +18,8 @@ func TestDetect(t *testing.T) {
 		{"timestamped log not search", "2026-06-30T10:00:01 ERROR upstream timeout\n2026-06-30T10:00:02 ERROR retry failed\n2026-06-30T10:00:03 ERROR giving up", BuildLog},
 		// A grep-style path prefix still detects as search.
 		{"path-prefixed search", "src/app.go:42:return err\nsrc/app.go:43:}\npkg/db.go:8:var conn", SearchResults},
+		// grep -C output (colon matches + dash context lines) detects as search.
+		{"grep context search", "src/app.go:42:return err\nsrc/app.go-43-cleanup()\nsrc/app.go-44-}\npkg/db.go:8:var conn", SearchResults},
 		{"code", "package main\nimport \"fmt\"\nfunc main() {\n  const x = 1\n}", SourceCode},
 		{"kubectl describe (yaml-like)", "Name:             pod-1\nNamespace:        prod\nNode:             n1\nLabels:           app=x\nStatus:           Running\nIP:               10.0.0.1\nContainers:\n  main:\n    Image:  img:v1\n    State:  Started\n    Ready:  True\nVolumes:\n  v1:\n    Type: ConfigMap\nQoS Class:        Burstable\nTolerations:      op=Exists\nEvents:           none", YAMLLike},
 		{"events-heavy describe stays yaml not log", "Name:   p\nStatus: Running\nReason: x\nHost:   h\nPort:   80\nPath:   /\nMode:   fast\nKind:   Pod\nZone:   a\nRack:   b\nSlot:   1\nUnit:   2\nCase:   3\nWarn:   Warning BackOff restarting\nNote:   Warning failed to pull\nMore:   Warning unhealthy probe", YAMLLike},
