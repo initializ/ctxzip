@@ -272,6 +272,11 @@ Shipped:
         dependency-light (CGO + grammars only where wanted). Other languages
         still fall back to extractive text, so nothing regresses
 - [x] line-mode text compression (grep/log layout preserved byte-faithfully)
+- [x] categorical drop summaries — JSON offloads carry a `_summary` sentinel with
+      the dropped items' value distribution ("status: 118 Running, 2 Succeeded;
+      3 error-like"), and line-mode text a trailer ("[offloaded: 118 running, 20
+      completed]"), so the model can answer count/what-happened questions without
+      retrieving. (Ahead of headroom here — its markers carry a bare count.)
 - [x] durable `BoltStore` (restart-safe originals)
 - [x] caller `MustKeep` vocabulary + extended k8s error floor
 - [x] `SkipNames` expansion-tool exemption
@@ -282,7 +287,9 @@ Planned:
 
 - [ ] code crusher — more tree-sitter languages (Rust, Ruby, Kotlin, …) in the
       `codelang` module; score-aware body budgeting
-- [ ] richer categorical drop summaries ("149 Running, 3 error-like") in markers
+- [ ] categorical drop summaries for the remaining crushers where they'd help
+      (e.g. a log-level breakdown "32 info, 6 debug, 2 warn") — the high-value
+      JSON/table cases already ship above
 - [ ] optional ML prose path behind the same `Compressor` interface
 - [ ] optional embedding relevance scorer (build-tagged) fused with BM25
       through the `Scorer` interface
