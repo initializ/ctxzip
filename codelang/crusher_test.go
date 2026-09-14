@@ -204,6 +204,41 @@ func TestCrusher_PerLanguage(t *testing.T) {
 	}
 }
 
+// TestCrusher_TSNotClaimedByJS is the regression for the detection nit: a TS
+// file with MANY JavaScript signals (const/function/=>/===) and only a couple of
+// TS-only ones (interface, : number) must still be detected as TypeScript, so
+// its typed signatures aren't parsed by the JS grammar and missed.
+func TestCrusher_TSNotClaimedByJS(t *testing.T) {
+	src := `interface Opts {
+    limit: number;
+}
+
+const factor = 2;
+const scale = (n) => n * factor;
+
+function process(opts: Opts): number {
+    const base = opts.limit;
+    const out = scale(base);
+    const check = out === base;
+    return check ? out : base;
+}
+
+function reduceAll(xs) {
+    const acc = xs.reduce((a, b) => a + b, 0);
+    const avg = acc / xs.length;
+    return avg;
+}
+`
+	store := ccr.NewMemoryStore(ccr.MemoryConfig{})
+	res, _ := NewCrusher().Compress(crush.Request{Content: src, Store: store})
+	if res.Strategy != "code_treesitter:typescript" {
+		t.Fatalf("TS file misdetected: strategy = %q, want code_treesitter:typescript", res.Strategy)
+	}
+	if got := expand(t, res.Compressed, store); got != src {
+		t.Fatal("round-trip not byte-exact")
+	}
+}
+
 func TestCrusher_MustKeepProtectsBody(t *testing.T) {
 	src := `# module
 import math

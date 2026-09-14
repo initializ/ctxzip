@@ -17,9 +17,12 @@ import (
 //
 // Tier A (this crusher) handles Go natively via the standard library's
 // go/parser + go/ast — no third-party dependency, and AST-accurate brace
-// matching so string/comment braces never fool it. Other languages fall back to
-// the extractive text crusher (unchanged from how SourceCode routed before), so
-// nothing regresses; a build-tagged tree-sitter path for them is a follow-up.
+// matching so string/comment braces never fool it. Other languages go to
+// Fallback: the tree-sitter-backed ctxzip/codelang module (Tier B — Python /
+// TS / JS / Java / C / C++) handles them when injected, and it lives in its own
+// module so the core keeps no CGO/tree-sitter dependency. With no Fallback set,
+// they fall back to the extractive text crusher (unchanged from how SourceCode
+// routed before), so nothing regresses either way.
 //
 // Reversibility is position-preserving and byte-exact: each elided body's
 // interior (the bytes between its braces) is offloaded and replaced in place by
