@@ -25,6 +25,7 @@ jobs:
           severity-cutoff: high
           only-fixed: true
       - name: Upload SARIF
+        continue-on-error: true  # SARIF upload needs GHAS code scanning; best-effort so a private repo without it does not red the check
         if: always()
         uses: github/codeql-action/upload-sarif@v3
         with:
