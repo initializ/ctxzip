@@ -31,6 +31,14 @@ type JSONCrusher struct {
 	MinItems int
 }
 
+// jsonMinKeep / jsonMaxKeep bound the adaptive keep budget for the distinct
+// (non-floor) middle items: never fewer than jsonMinKeep representatives, never
+// an unbounded tail. adaptiveKeepCount scales between them by diversity.
+const (
+	jsonMinKeep = 3
+	jsonMaxKeep = 40
+)
+
 // NewJSONCrusher returns a JSONCrusher with sensible defaults.
 func NewJSONCrusher() *JSONCrusher {
 	return &JSONCrusher{HeadKeep: 5, TailKeep: 3, MinItems: 8}
@@ -52,23 +60,78 @@ func (c *JSONCrusher) Compress(req Request) (Result, error) {
 
 	terms := queryTerms(req.Query)
 	keep := make([]bool, len(items))
-	seen := make(map[string]bool, len(items))
+
+	// Signature-dedup + adaptive scored budget (headroom-parity): a large array
+	// of near-identical rows (search hits, log lines differing only by ids/line
+	// numbers) collapses to a representative sample, instead of the old rule that
+	// kept every row merely MENTIONING "error" (which pinned entire arrays of Go
+	// signatures like `func H(ctx context.Context) error`).
+	// Collapse near-duplicate rows to ONE representative per signature, keeping
+	// the highest-scoring member of each group so a query-relevant / soft-error
+	// row is never lost to a plainer sibling that shares its shape.
+	type softItem struct {
+		idx   int
+		text  string
+		score int
+	}
+	sigOf := map[string]int{} // signature -> index into reps
+	var reps []softItem
+
+	score := func(s string) int {
+		sc := 0
+		if matchesAny(s, terms) {
+			sc += 2 // query relevance
+		}
+		if looksError(s) { // broad mention → soft boost only, not an absolute keep
+			sc++
+		}
+		if looksFragile(s) {
+			sc++
+		}
+		return sc
+	}
 
 	for i, raw := range items {
-		// Always keep head and tail.
+		// Always keep head and tail (callers care about boundaries).
 		if i < c.HeadKeep || i >= len(items)-c.TailKeep {
 			keep[i] = true
 			continue
 		}
 		s := strings.ToLower(string(raw))
-		// Drop exact duplicates of content already kept or seen.
-		if seen[s] {
+		// Absolute floor — never dropped: caller must-keeps and STRUCTURAL errors
+		// (log levels, stack traces, structured level fields). NOT the bare word
+		// "error". looksHardError takes the ORIGINAL text (uppercase is a signal).
+		if mustKeep(s, req.MustKeep) || looksHardError(string(raw)) {
+			keep[i] = true
 			continue
 		}
-		seen[s] = true
-		// Must-keep: error-like, builder-flagged, or query-relevant items.
-		if looksError(s) || mustKeep(s, req.MustKeep) || matchesAny(s, terms) {
-			keep[i] = true
+		sc := score(s)
+		sig := lineSig(s)
+		if j, ok := sigOf[sig]; ok {
+			if sc > reps[j].score { // better representative of this shape
+				reps[j] = softItem{idx: i, text: string(raw), score: sc}
+			}
+			continue // sibling of an already-tracked group → offload
+		}
+		sigOf[sig] = len(reps)
+		reps = append(reps, softItem{idx: i, text: string(raw), score: sc})
+	}
+
+	// Keep the top-K representatives: K adapts to their diversity (redundant →
+	// few, diverse → more) and is capped so a huge array can't retain an
+	// unbounded tail. Stable sort keeps first-seen order within equal scores.
+	if len(reps) > 0 {
+		strs := make([]string, len(reps))
+		for j, it := range reps {
+			strs[j] = it.text
+		}
+		k := adaptiveKeepCount(strs, jsonMinKeep, jsonMaxKeep)
+		if k > len(reps) {
+			k = len(reps)
+		}
+		sort.SliceStable(reps, func(a, b int) bool { return reps[a].score > reps[b].score })
+		for j := 0; j < k; j++ {
+			keep[reps[j].idx] = true
 		}
 	}
 

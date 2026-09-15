@@ -52,6 +52,34 @@ func looksError(s string) bool {
 	return false
 }
 
+// hardErrorRe matches STRUCTURAL error signals — log-level tokens, stack
+// traces, structured level fields, compiler error codes, k8s failure states —
+// as opposed to the mere mention of the word "error" (a Go `error` return type,
+// a line saying "0 errors"). looksError stays deliberately broad and is used as
+// a soft ranking boost; looksHardError is the tighter test used where an item
+// must be kept ABSOLUTELY, so a uniform array that all merely mentions "error"
+// can still compress instead of pinning every row. Case-sensitive by design:
+// loggers emit uppercase levels, and callers pass the ORIGINAL (not lowercased)
+// text.
+var hardErrorRe = regexp.MustCompile(strings.Join([]string{
+	// Uppercase log levels + Kubernetes failure states (word-bounded).
+	`\b(?:ERROR|FATAL|FAILED|FAILURE|PANIC|CRITICAL|EXCEPTION|SIGSEGV|SIGABRT|OOMKilled|CrashLoopBackOff|ImagePullBackOff|Evicted)\b`,
+	// Anchored lowercase: "error:", "panic:", "error[E0433]", "traceback:".
+	`(?i:\b(?:error|fatal|panic|exception|traceback|failed|failure|denied|rejected)\b\s*[:\[])`,
+	// Line-start error/level keyword.
+	`(?im:^\s*(?:error|fatal|panic|exception|traceback)\b)`,
+	// Structured level fields: {"level":"error"} / level=fatal.
+	`(?i:"level"\s*:\s*"(?:error|fatal|critical|panic)")`,
+	`(?i:\blevel=(?:error|fatal|critical|panic)\b)`,
+}, "|"))
+
+// looksHardError reports whether s carries a structural error signal (see
+// hardErrorRe). Pass the ORIGINAL text, not a lowercased copy — uppercase log
+// levels are a deliberate signal.
+func looksHardError(s string) bool {
+	return hardErrorRe.MatchString(s)
+}
+
 // IsErrorLike reports whether s matches the built-in error floor — the terms
 // compression never drops. Exported for feedback loops in host runtimes:
 // a token already on the floor was KEPT, so it cannot be the reason a model
